@@ -1,0 +1,2 @@
+# FogMap
+A gamified map
