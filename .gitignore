@@ -1,4 +1,6 @@
 # Miscellaneous
+.DS_Store
+**/.DS_Store
 *.class
 *.lock
 *.log
@@ -6,8 +8,6 @@
 *.swp
 .buildlog/
 .history
-
-
 
 # Flutter repo-specific
 /bin/cache/
@@ -117,3 +117,19 @@ app.*.symbols
 !**/ios/**/default.perspectivev3
 !/packages/flutter_tools/test/data/dart_dependencies_test/**/.packages
 !/dev/ci/**/Gemfile.lock
+
+# amplify
+node_modules
+.amplify
+amplify_outputs*
+amplifyconfiguration*
+
+# Terraform
+# 1. Ignore the entire Terraform directory contents
+Terraform/**/*
+
+# 2. But do NOT ignore the directory itself (so we can look inside)
+!Terraform/
+
+# 3. Allow these specific files
+!Terraform/*.tfstate

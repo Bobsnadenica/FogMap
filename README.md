@@ -31,38 +31,52 @@ Used for geospatial coordinate handling.
 
 # Current folder structure
 
-```text
-fog_frontier/
-├─ pubspec.yaml
-├─ README.md
-├─ lib/
-│  ├─ main.dart
-│  ├─ app.dart
-│  ├─ core/
-│  │  ├─ constants/app_constants.dart
-│  │  ├─ theme/app_theme.dart
-│  │  └─ utils/discovery_math.dart
-│  ├─ data/
-│  │  ├─ models/reveal_point.dart
-│  │  ├─ models/player_profile.dart
-│  │  └─ models/achievement.dart
-│  ├─ services/
-│  │  ├─ local_profile_store.dart
-│  │  ├─ location_service.dart
-│  │  └─ share_service.dart
-│  ├─ controllers/
-│  │  └─ app_controller.dart
-│  ├─ ui/
-│  │  ├─ screens/app_shell.dart
-│  │  ├─ screens/map_screen.dart
-│  │  ├─ screens/profile_screen.dart
-│  │  ├─ screens/achievements_screen.dart
-│  │  └─ widgets/fog_of_war_overlay.dart
-│  └─ sync/
-│     ├─ sync_mode.dart
-│     └─ map_sync_repository.dart
-├─ android/
-└─ ios/
+world_of_fog_cloud/
+├─ amplify/
+│  ├─ package.json
+│  ├─ tsconfig.json
+│  └─ amplify/
+│     ├─ backend.ts
+│     ├─ auth/
+│     │  └─ resource.ts
+│     ├─ data/
+│     │  └─ resource.ts
+│     └─ functions/
+│        ├─ _shared/
+│        │  ├─ config.ts
+│        │  ├─ dynamo.ts
+│        │  └─ geo.ts
+│        ├─ sync-discoveries/
+│        │  ├─ resource.ts
+│        │  └─ handler.ts
+│        ├─ get-shared-viewport/
+│        │  ├─ resource.ts
+│        │  └─ handler.ts
+│        ├─ create-upload-ticket/
+│        │  ├─ resource.ts
+│        │  └─ handler.ts
+│        ├─ finalize-landmark/
+│        │  ├─ resource.ts
+│        │  └─ handler.ts
+│        ├─ approve-landmark/
+│        │  ├─ resource.ts
+│        │  └─ handler.ts
+│        └─ get-landmark-view-url/
+│           ├─ resource.ts
+│           └─ handler.ts
+├─ terraform/
+│  ├─ providers.tf
+│  ├─ variables.tf
+│  ├─ main.tf
+│  ├─ outputs.tf
+│  └─ terraform.tfvars.example
+└─ flutter/
+   └─ lib/
+      └─ cloud/
+         ├─ map_mode.dart
+         ├─ models/shared_viewport_models.dart
+         ├─ services/shared_map_service.dart
+         └─ widgets/map_mode_toggle.dart
 
 File-by-file responsibility guide
 lib/main.dart

@@ -2,9 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 
+import '../../cloud/map_mode.dart';
+import '../../cloud/models/shared_viewport_models.dart';
 import '../../controllers/app_controller.dart';
 import '../../core/constants/app_constants.dart';
 import '../widgets/fog_of_war_overlay.dart';
+import '../widgets/map_mode_toggle.dart';
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key, required this.controller});
@@ -30,9 +33,7 @@ class _MapScreenState extends State<MapScreen> {
               AppConstants.defaultLat,
               AppConstants.defaultLon,
             );
-
-        final isTracking = widget.controller.tracking;
-        final isBusy = widget.controller.busy;
+        final fogReveals = widget.controller.activeFogReveals;
 
         return Scaffold(
           appBar: AppBar(
@@ -72,11 +73,16 @@ class _MapScreenState extends State<MapScreen> {
                           _mapReady = true;
                           _mapRevision++;
                         });
+                        widget.controller
+                            .refreshSharedViewport(widget.controller.mapController.camera);
                       }
                     },
                     onPositionChanged: (_, __) {
                       if (mounted && _mapReady) {
                         setState(() => _mapRevision++);
+                        widget.controller.scheduleSharedViewportRefresh(
+                          widget.controller.mapController.camera,
+                        );
                       }
                     },
                   ),
@@ -86,7 +92,8 @@ class _MapScreenState extends State<MapScreen> {
                       userAgentPackageName:
                           AppConstants.userAgentPackageName,
                     ),
-                    if (widget.controller.revealLatLngs.length > 1)
+                    if (widget.controller.revealLatLngs.length > 1 &&
+                        widget.controller.mapMode == MapMode.personal)
                       PolylineLayer(
                         polylines: [
                           Polyline(
@@ -96,9 +103,9 @@ class _MapScreenState extends State<MapScreen> {
                           ),
                         ],
                       ),
-                    if (current != null)
-                      MarkerLayer(
-                        markers: [
+                    MarkerLayer(
+                      markers: [
+                        if (current != null)
                           Marker(
                             point: current,
                             width: 28,
@@ -120,16 +127,52 @@ class _MapScreenState extends State<MapScreen> {
                               ),
                             ),
                           ),
-                        ],
-                      ),
+                        if (widget.controller.mapMode == MapMode.shared)
+                          ...widget.controller.sharedPlayers.map(_playerMarker),
+                        if (widget.controller.mapMode == MapMode.shared)
+                          ...widget.controller.sharedLandmarks.map(
+                            (e) => _landmarkMarker(context, e),
+                          ),
+                      ],
+                    ),
                   ],
                 ),
               ),
+              Positioned(
+                left: 12,
+                top: 12,
+                child: Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: MapModeToggle(
+                      mode: widget.controller.mapMode,
+                      onChanged: (mode) => widget.controller.setMapMode(
+                        mode,
+                        camera: _mapReady
+                            ? widget.controller.mapController.camera
+                            : null,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+              if (widget.controller.mapMode == MapMode.shared &&
+                  !widget.controller.isSignedIn)
+                Positioned(
+                  left: 12,
+                  right: 12,
+                  top: 80,
+                  child: Card(
+                    color: const Color(0xAA5B2F1A),
+                    child: const Padding(
+                      padding: EdgeInsets.all(12),
+                      child: Text('Sign in from Profile to use the shared map.'),
+                    ),
+                  ),
+                ),
               Positioned.fill(
                 child: IgnorePointer(
-                  child: Container(
-                    color: const Color(0x10170F07),
-                  ),
+                  child: Container(color: const Color(0x10170F07)),
                 ),
               ),
               if (_mapReady)
@@ -138,29 +181,10 @@ class _MapScreenState extends State<MapScreen> {
                     child: FogOfWarOverlay(
                       key: ValueKey(_mapRevision),
                       camera: widget.controller.mapController.camera,
-                      reveals: widget.controller.reveals,
+                      reveals: fogReveals,
                     ),
                   ),
                 ),
-              Positioned.fill(
-                child: IgnorePointer(
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      border: Border.all(
-                        color: const Color(0x996A4A22),
-                        width: 6,
-                      ),
-                      boxShadow: const [
-                        BoxShadow(
-                          color: Color(0x55000000),
-                          blurRadius: 18,
-                          spreadRadius: 2,
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
               Positioned(
                 right: 12,
                 left: 12,
@@ -202,20 +226,20 @@ class _MapScreenState extends State<MapScreen> {
                           vertical: 8,
                         ),
                         decoration: BoxDecoration(
-                          color: isTracking
+                          color: widget.controller.tracking
                               ? const Color(0xAA234229)
                               : const Color(0xAA4A2A1A),
                           borderRadius: BorderRadius.circular(999),
                           border: Border.all(
-                            color: isTracking
+                            color: widget.controller.tracking
                                 ? const Color(0xFF79C27F)
                                 : const Color(0xFFD6B36A),
                           ),
                         ),
                         child: Text(
-                          isBusy
-                              ? 'Requesting location...'
-                              : isTracking
+                          widget.controller.sharedLoading
+                              ? 'Loading shared map...'
+                              : widget.controller.tracking
                                   ? 'Tracking active'
                                   : 'Tracking unavailable',
                           style: const TextStyle(
@@ -225,43 +249,188 @@ class _MapScreenState extends State<MapScreen> {
                         ),
                       ),
                     ),
-                    const SizedBox(height: 8),
-                    Align(
-                      alignment: Alignment.bottomRight,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 6,
-                        ),
-                        decoration: BoxDecoration(
-                          color: const Color(0xAA0B0D10),
-                          borderRadius: BorderRadius.circular(12),
-                        ),
-                        child: const Text(
-                          '© OpenStreetMap contributors',
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: Colors.white70,
-                          ),
-                        ),
-                      ),
-                    ),
                   ],
                 ),
               ),
             ],
           ),
+          floatingActionButton: widget.controller.isSignedIn
+              ? FloatingActionButton.extended(
+                  onPressed: () => _showAddLandmarkSheet(context),
+                  icon: const Icon(Icons.add_a_photo),
+                  label: const Text('Landmark'),
+                )
+              : null,
         );
       },
+    );
+  }
+
+  Marker _playerMarker(SharedPlayer player) {
+    return Marker(
+      point: LatLng(player.lat, player.lon),
+      width: 56,
+      height: 56,
+      child: Column(
+        children: [
+          Container(
+            width: 18,
+            height: 18,
+            decoration: BoxDecoration(
+              color: const Color(0xFF6FC1FF),
+              shape: BoxShape.circle,
+              border: Border.all(color: Colors.white, width: 2),
+            ),
+          ),
+          const SizedBox(height: 2),
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+            color: const Color(0xAA0B0D10),
+            child: Text(
+              player.displayName,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(fontSize: 10),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Marker _landmarkMarker(BuildContext context, SharedLandmark landmark) {
+    return Marker(
+      point: LatLng(landmark.lat, landmark.lon),
+      width: 36,
+      height: 36,
+      child: GestureDetector(
+        onTap: () async {
+          final viewUrl =
+              await widget.controller.getLandmarkViewUrl(landmark.landmarkId);
+          if (!context.mounted) return;
+          showModalBottomSheet(
+            context: context,
+            builder: (_) => Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    landmark.title,
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 8),
+                  Text(landmark.description),
+                  const SizedBox(height: 12),
+                  ClipRRect(
+                    borderRadius: BorderRadius.circular(12),
+                    child: Image.network(
+                      viewUrl,
+                      height: 220,
+                      fit: BoxFit.cover,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          );
+        },
+        child: Container(
+          decoration: BoxDecoration(
+            color: const Color(0xFF9B6A2C),
+            shape: BoxShape.circle,
+            border: Border.all(color: Colors.white, width: 2),
+          ),
+          child: const Icon(
+            Icons.photo_camera,
+            size: 18,
+            color: Colors.white,
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showAddLandmarkSheet(BuildContext context) {
+    final titleController = TextEditingController();
+    final descriptionController = TextEditingController();
+    final categoryController = TextEditingController(text: 'poi');
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) => SafeArea(
+        child: AnimatedPadding(
+          duration: const Duration(milliseconds: 180),
+          padding: EdgeInsets.only(
+            left: 16,
+            right: 16,
+            top: 16,
+            bottom: MediaQuery.of(sheetContext).viewInsets.bottom + 16,
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: titleController,
+                  textInputAction: TextInputAction.next,
+                  decoration: const InputDecoration(labelText: 'Title'),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: categoryController,
+                  textInputAction: TextInputAction.next,
+                  decoration: const InputDecoration(labelText: 'Category'),
+                ),
+                const SizedBox(height: 8),
+                TextField(
+                  controller: descriptionController,
+                  minLines: 2,
+                  maxLines: 4,
+                  textInputAction: TextInputAction.done,
+                  decoration: const InputDecoration(labelText: 'Description'),
+                ),
+                const SizedBox(height: 12),
+                FilledButton.icon(
+                  onPressed: () async {
+                    FocusScope.of(sheetContext).unfocus();
+                    Navigator.of(sheetContext).pop();
+
+                    try {
+                      await widget.controller.uploadLandmark(
+                        title: titleController.text,
+                        description: descriptionController.text,
+                        category: categoryController.text,
+                        mapZoom: 17,
+                      );
+                      if (!context.mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Landmark uploaded for review.'),
+                        ),
+                      );
+                    } catch (e) {
+                      if (!context.mounted) return;
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text(e.toString())),
+                      );
+                    }
+                  },
+                  icon: const Icon(Icons.photo_camera),
+                  label: const Text('Take photo and upload'),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
 
 class _MiniStat extends StatelessWidget {
-  const _MiniStat({
-    required this.label,
-    required this.value,
-  });
+  const _MiniStat({required this.label, required this.value});
 
   final String label;
   final String value;

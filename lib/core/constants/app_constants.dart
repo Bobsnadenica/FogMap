@@ -1,9 +1,6 @@
 class AppConstants {
-  static const String appName = 'FogFrontier';
-
-  // Replace this with your real package id before release.
+  static const String appName = 'World Of Fog';
   static const String userAgentPackageName = 'com.example.fogfrontier';
-
   static const String tileUrlTemplate =
       'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
 
@@ -11,13 +8,8 @@ class AppConstants {
   static const double minZoom = 2.0;
   static const double maxZoom = 18.0;
 
-  // Street-level discovery tuning.
-  // Around a small patch of road / sidewalk rather than a huge area.
-  static const double discoveryRadiusMeters = 8.0;
+  static const double discoveryRadiusMeters = 16.0;
   static const double minDistanceBetweenRevealsMeters = 8.0;
-
-  // Much smaller discovery cells so progress matches real movement.
-  // Roughly street-scale cells.
   static const double statsCellDegrees = 0.00018;
 
   static const double defaultLat = 20.0;

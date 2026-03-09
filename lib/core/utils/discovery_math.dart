@@ -2,6 +2,8 @@ import 'dart:math' as math;
 
 import 'package:latlong2/latlong.dart';
 
+import '../../data/models/cloud_discovery_cell.dart';
+
 class DiscoveryMath {
   static const Distance _distance = Distance();
 
@@ -11,7 +13,29 @@ class DiscoveryMath {
     return '$latIndex:$lonIndex';
   }
 
+  static LatLng cellCenterFromId(String cellId, double cellDegrees) {
+    final parts = cellId.split(':');
+    final latIndex = int.parse(parts[0]);
+    final lonIndex = int.parse(parts[1]);
+    return LatLng(
+      (latIndex * cellDegrees) - 90.0 + (cellDegrees / 2),
+      (lonIndex * cellDegrees) - 180.0 + (cellDegrees / 2),
+    );
+  }
+
   static Set<String> cellsForReveal({
+    required LatLng point,
+    required double radiusMeters,
+    required double cellDegrees,
+  }) {
+    return cellsForRevealData(
+      point: point,
+      radiusMeters: radiusMeters,
+      cellDegrees: cellDegrees,
+    ).map((e) => e.cellId).toSet();
+  }
+
+  static Set<CloudDiscoveryCell> cellsForRevealData({
     required LatLng point,
     required double radiusMeters,
     required double cellDegrees,
@@ -26,17 +50,25 @@ class DiscoveryMath {
     final minLon = point.longitude - lonDelta;
     final maxLon = point.longitude + lonDelta;
 
-    final latStart = (((minLat + 90.0) / cellDegrees).floor() * cellDegrees) - 90.0;
-    final lonStart = (((minLon + 180.0) / cellDegrees).floor() * cellDegrees) - 180.0;
+    final latStart =
+        (((minLat + 90.0) / cellDegrees).floor() * cellDegrees) - 90.0;
+    final lonStart =
+        (((minLon + 180.0) / cellDegrees).floor() * cellDegrees) - 180.0;
 
-    final cells = <String>{};
+    final cells = <CloudDiscoveryCell>{};
 
     for (double lat = latStart; lat <= maxLat; lat += cellDegrees) {
       for (double lon = lonStart; lon <= maxLon; lon += cellDegrees) {
         final center = LatLng(lat + cellDegrees / 2, lon + cellDegrees / 2);
         final meters = _distance(point, center);
         if (meters <= radiusMeters) {
-          cells.add(cellIdFromLatLng(center, cellDegrees));
+          cells.add(
+            CloudDiscoveryCell(
+              cellId: cellIdFromLatLng(center, cellDegrees),
+              latitude: center.latitude,
+              longitude: center.longitude,
+            ),
+          );
         }
       }
     }
