@@ -1,5 +1,6 @@
 class AuthSession {
   const AuthSession({
+    required this.userId,
     required this.email,
     required this.idToken,
     required this.accessToken,
@@ -8,6 +9,7 @@ class AuthSession {
     required this.expiresAtEpochSeconds,
   });
 
+  final String userId;
   final String email;
   final String idToken;
   final String accessToken;
@@ -16,7 +18,8 @@ class AuthSession {
   final int expiresAtEpochSeconds;
 
   bool get isExpired =>
-      DateTime.now().millisecondsSinceEpoch >= expiresAtEpochSeconds * 1000;
+      DateTime.now().millisecondsSinceEpoch >=
+      (expiresAtEpochSeconds - 60) * 1000;
 
   bool get isAdminOrModerator =>
       groups.contains('admin') || groups.contains('moderator');

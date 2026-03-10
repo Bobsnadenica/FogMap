@@ -1,3 +1,6 @@
+import 'dart:math' as math;
+import 'dart:ui' as ui;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
@@ -11,10 +14,14 @@ class FogOfWarOverlay extends StatelessWidget {
     super.key,
     required this.camera,
     required this.reveals,
+    required this.trailPoints,
+    required this.revision,
   });
 
   final MapCamera camera;
   final List<RevealPoint> reveals;
+  final List<LatLng> trailPoints;
+  final int revision;
 
   @override
   Widget build(BuildContext context) {
@@ -22,6 +29,8 @@ class FogOfWarOverlay extends StatelessWidget {
       painter: _FogOfWarPainter(
         camera: camera,
         reveals: reveals,
+        trailPoints: trailPoints,
+        revision: revision,
       ),
       size: Size.infinite,
     );
@@ -32,10 +41,29 @@ class _FogOfWarPainter extends CustomPainter {
   _FogOfWarPainter({
     required this.camera,
     required this.reveals,
-  });
+    required this.trailPoints,
+    required this.revision,
+  }) : _revealSignature = Object.hashAll(
+          reveals.map(
+            (reveal) => DiscoveryMath.cellIdFromLatLng(
+              LatLng(reveal.latitude, reveal.longitude),
+              AppConstants.statsCellDegrees,
+            ),
+          ),
+        ),
+        _trailSignature = Object.hashAll(
+          trailPoints.map(
+            (point) =>
+                '${point.latitude.toStringAsFixed(6)}:${point.longitude.toStringAsFixed(6)}',
+          ),
+        );
 
   final MapCamera camera;
   final List<RevealPoint> reveals;
+  final List<LatLng> trailPoints;
+  final int revision;
+  final int _revealSignature;
+  final int _trailSignature;
 
   @override
   void paint(Canvas canvas, Size size) {
@@ -72,45 +100,51 @@ class _FogOfWarPainter extends CustomPainter {
         ).createShader(rect),
     );
 
-    for (final reveal in reveals) {
-      final latLng = LatLng(reveal.latitude, reveal.longitude);
-      final screenPoint = camera.latLngToScreenOffset(latLng);
-      final radiusPx = _radiusInPixels(latLng.latitude, camera.zoom);
+    final stripSoftPaint = Paint()
+      ..blendMode = BlendMode.dstOut
+      ..style = PaintingStyle.fill
+      ..color = const Color(0xD8FFFFFF)
+      ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2.4);
 
-      if (screenPoint.dx < -radiusPx * 2 ||
-          screenPoint.dx > size.width + radiusPx * 2 ||
-          screenPoint.dy < -radiusPx * 2 ||
-          screenPoint.dy > size.height + radiusPx * 2) {
-        continue;
-      }
+    final stripCorePaint = Paint()
+      ..blendMode = BlendMode.dstOut
+      ..style = PaintingStyle.fill
+      ..color = const Color(0xF2FFFFFF);
 
-      final revealRect = Rect.fromCircle(
-        center: screenPoint,
-        radius: radiusPx * 1.75,
-      );
+    for (final strip in _mergedCellStrips()) {
+      final featherPath = _pathForStrip(strip, inflatePixels: 2.0);
+      final corePath = _pathForStrip(strip);
 
-      // Softer outer reveal + much clearer center.
-      final revealPaint = Paint()
+      canvas.drawPath(featherPath, stripSoftPaint);
+      canvas.drawPath(corePath, stripCorePaint);
+    }
+
+    final trailPath = _trailPath();
+    if (trailPath != null) {
+      final trailWidth = _trailWidthPixels();
+      final trailSoftPaint = Paint()
         ..blendMode = BlendMode.dstOut
-        ..shader = RadialGradient(
-          colors: const [
-            Color(0xFFFFFFFF),
-            Color(0xF2FFFFFF),
-            Color(0xB8FFFFFF),
-            Color(0x55FFFFFF),
-            Color(0x00FFFFFF),
-          ],
-          stops: const [0.0, 0.24, 0.48, 0.78, 1.0],
-        ).createShader(revealRect);
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..strokeWidth = trailWidth + 6
+        ..color = const Color(0xD8FFFFFF)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2.8);
 
-      canvas.drawCircle(screenPoint, radiusPx * 1.75, revealPaint);
+      final trailClearPaint = Paint()
+        ..blendMode = BlendMode.clear
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..strokeWidth = trailWidth;
 
-      // Clear center so discovered roads/labels become readable.
-      canvas.drawCircle(
-        screenPoint,
-        radiusPx * 0.72,
-        Paint()..blendMode = BlendMode.clear,
-      );
+      canvas.drawPath(trailPath, trailSoftPaint);
+      canvas.drawPath(trailPath, trailClearPaint);
+
+      if (trailPoints.length == 1) {
+        final center = camera.latLngToScreenOffset(trailPoints.first);
+        canvas.drawCircle(center, trailWidth / 2, trailClearPaint);
+      }
     }
 
     canvas.restore();
@@ -123,16 +157,148 @@ class _FogOfWarPainter extends CustomPainter {
     canvas.drawRect(rect.deflate(3), borderPaint);
   }
 
-  double _radiusInPixels(double latitude, double zoom) {
-    final metersPerPixel = DiscoveryMath.metersPerPixel(latitude, zoom);
-    return AppConstants.discoveryRadiusMeters / metersPerPixel;
+  List<_CellStrip> _mergedCellStrips() {
+    final rows = <int, Set<int>>{};
+
+    for (final reveal in reveals) {
+      final cellId = DiscoveryMath.cellIdFromLatLng(
+        LatLng(reveal.latitude, reveal.longitude),
+        AppConstants.statsCellDegrees,
+      );
+      final parts = cellId.split(':');
+      final latIndex = int.parse(parts[0]);
+      final lonIndex = int.parse(parts[1]);
+      rows.putIfAbsent(latIndex, () => <int>{}).add(lonIndex);
+    }
+
+    final strips = <_CellStrip>[];
+
+    for (final entry in rows.entries) {
+      final sorted = entry.value.toList()..sort();
+      if (sorted.isEmpty) continue;
+
+      var start = sorted.first;
+      var end = start;
+
+      for (final lonIndex in sorted.skip(1)) {
+        if (lonIndex == end + 1) {
+          end = lonIndex;
+          continue;
+        }
+
+        strips.add(
+          _CellStrip(
+            latIndex: entry.key,
+            lonStart: start,
+            lonEnd: end,
+          ),
+        );
+        start = lonIndex;
+        end = lonIndex;
+      }
+
+      strips.add(
+        _CellStrip(
+          latIndex: entry.key,
+          lonStart: start,
+          lonEnd: end,
+        ),
+      );
+    }
+
+    return strips;
+  }
+
+  ui.Path _pathForStrip(_CellStrip strip, {double inflatePixels = 0}) {
+    final southLat = (strip.latIndex * AppConstants.statsCellDegrees) - 90.0;
+    final northLat =
+        ((strip.latIndex + 1) * AppConstants.statsCellDegrees) - 90.0;
+    final westLon = (strip.lonStart * AppConstants.statsCellDegrees) - 180.0;
+    final eastLon =
+        ((strip.lonEnd + 1) * AppConstants.statsCellDegrees) - 180.0;
+
+    final northWest = camera.latLngToScreenOffset(LatLng(northLat, westLon));
+    final northEast = camera.latLngToScreenOffset(LatLng(northLat, eastLon));
+    final southEast = camera.latLngToScreenOffset(LatLng(southLat, eastLon));
+    final southWest = camera.latLngToScreenOffset(LatLng(southLat, westLon));
+
+    if (camera.rotation.abs() < 0.001) {
+      final minX = math.min(
+        math.min(northWest.dx, northEast.dx),
+        math.min(southWest.dx, southEast.dx),
+      );
+      final maxX = math.max(
+        math.max(northWest.dx, northEast.dx),
+        math.max(southWest.dx, southEast.dx),
+      );
+      final minY = math.min(
+        math.min(northWest.dy, northEast.dy),
+        math.min(southWest.dy, southEast.dy),
+      );
+      final maxY = math.max(
+        math.max(northWest.dy, northEast.dy),
+        math.max(southWest.dy, southEast.dy),
+      );
+      final rect = Rect.fromLTRB(minX, minY, maxX, maxY).inflate(inflatePixels);
+      final radius = Radius.circular(
+        math.min(rect.width, rect.height).clamp(0.0, 12.0).toDouble() * 0.45,
+      );
+      return ui.Path()
+        ..addRRect(ui.RRect.fromRectAndRadius(rect, radius));
+    }
+
+    return ui.Path()
+      ..moveTo(northWest.dx, northWest.dy)
+      ..lineTo(northEast.dx, northEast.dy)
+      ..lineTo(southEast.dx, southEast.dy)
+      ..lineTo(southWest.dx, southWest.dy)
+      ..close();
+  }
+
+  ui.Path? _trailPath() {
+    if (trailPoints.isEmpty) return null;
+
+    final path = ui.Path();
+    for (var index = 0; index < trailPoints.length; index++) {
+      final point = camera.latLngToScreenOffset(trailPoints[index]);
+      if (index == 0) {
+        path.moveTo(point.dx, point.dy);
+      } else {
+        path.lineTo(point.dx, point.dy);
+      }
+    }
+
+    return path;
+  }
+
+  double _trailWidthPixels() {
+    final metersPerPixel = DiscoveryMath.metersPerPixel(
+      camera.center.latitude,
+      camera.zoom,
+    );
+    final width = (AppConstants.discoveryRadiusMeters * 2.1) / metersPerPixel;
+    return width.clamp(12.0, 34.0).toDouble();
   }
 
   @override
   bool shouldRepaint(covariant _FogOfWarPainter oldDelegate) {
-    return oldDelegate.reveals.length != reveals.length ||
+    return oldDelegate._revealSignature != _revealSignature ||
+        oldDelegate._trailSignature != _trailSignature ||
+        oldDelegate.revision != revision ||
         oldDelegate.camera.center != camera.center ||
         oldDelegate.camera.zoom != camera.zoom ||
         oldDelegate.camera.rotation != camera.rotation;
   }
+}
+
+class _CellStrip {
+  const _CellStrip({
+    required this.latIndex,
+    required this.lonStart,
+    required this.lonEnd,
+  });
+
+  final int latIndex;
+  final int lonStart;
+  final int lonEnd;
 }

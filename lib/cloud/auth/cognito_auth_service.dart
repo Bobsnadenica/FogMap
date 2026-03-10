@@ -22,9 +22,16 @@ class CognitoAuthService {
   static const _refreshTokenKey = 'cognito_refresh_token';
   static const _groupsKey = 'cognito_groups';
   static const _expKey = 'cognito_exp';
+  static const _userIdKey = 'cognito_user_id';
+  static const _displayNameOverrideKey = 'cognito_display_name_override';
+  static const _displayNameLockedKey = 'cognito_display_name_locked';
 
   AuthSession? _currentSession;
+  String? _displayNameOverride;
+  bool _displayNameLockedOverride = false;
+
   AuthSession? get currentSession => _currentSession;
+
   bool get isSignedIn => _currentSession != null && !_currentSession!.isExpired;
 
   Future<void> init() async {
@@ -34,15 +41,28 @@ class CognitoAuthService {
     final refreshToken = await _storage.read(key: _refreshTokenKey);
     final groupsRaw = await _storage.read(key: _groupsKey);
     final expRaw = await _storage.read(key: _expKey);
+    final userId = await _storage.read(key: _userIdKey);
+    final displayNameOverride = await _storage.read(
+      key: _displayNameOverrideKey,
+    );
+    final displayNameLocked = await _storage.read(key: _displayNameLockedKey);
 
     if (email == null ||
+        userId == null ||
         idToken == null ||
         accessToken == null ||
         refreshToken == null ||
         expRaw == null) {
       _currentSession = null;
+      _displayNameOverride = null;
+      _displayNameLockedOverride = false;
       return;
     }
+
+    _displayNameOverride = displayNameOverride?.trim().isEmpty == true
+        ? null
+        : displayNameOverride?.trim();
+    _displayNameLockedOverride = displayNameLocked == 'true';
 
     final groups = groupsRaw == null || groupsRaw.isEmpty
         ? <String>[]
@@ -51,7 +71,9 @@ class CognitoAuthService {
             .toList();
 
     final exp = int.tryParse(expRaw) ?? 0;
-    final restored = AuthSession(
+
+    _currentSession = AuthSession(
+      userId: userId,
       email: email,
       idToken: idToken,
       accessToken: accessToken,
@@ -60,12 +82,13 @@ class CognitoAuthService {
       expiresAtEpochSeconds: exp,
     );
 
-    if (restored.isExpired) {
-      await signOut();
-      return;
+    if (_currentSession!.isExpired) {
+      try {
+        await _refreshSession();
+      } catch (_) {
+        await signOut();
+      }
     }
-
-    _currentSession = restored;
   }
 
   Future<void> signUp({
@@ -104,27 +127,13 @@ class CognitoAuthService {
         await user.authenticateUser(authDetails);
 
     if (session == null) {
-      throw Exception('Cognito sign-in did not return a user session.');
+      throw Exception('Cognito sign-in did not return a session.');
     }
 
-    final String idToken = session.getIdToken().getJwtToken() ?? '';
-    final String accessToken = session.getAccessToken().getJwtToken() ?? '';
-    final String refreshToken = session.getRefreshToken()?.getToken() ?? '';
-
-    if (idToken.isEmpty || accessToken.isEmpty) {
-      throw Exception('Cognito sign-in returned empty tokens.');
-    }
-
-    final groups = _extractGroups(idToken);
-    final exp = _extractExp(idToken);
-
-    final authSession = AuthSession(
+    final authSession = _sessionFromCognitoSession(
       email: email.trim(),
-      idToken: idToken,
-      accessToken: accessToken,
-      refreshToken: refreshToken,
-      groups: groups,
-      expiresAtEpochSeconds: exp,
+      session: session,
+      fallbackRefreshToken: '',
     );
 
     await _persist(authSession);
@@ -138,11 +147,154 @@ class CognitoAuthService {
   }
 
   Future<String?> getIdToken() async {
-    if (!isSignedIn) return null;
-    return _currentSession!.idToken;
+    await ensureValidSession();
+    return _currentSession?.idToken;
+  }
+
+  String? get currentUserId => _currentSession?.userId;
+
+  String? get currentDisplayName {
+    final current = _currentSession;
+    if (current == null) return null;
+
+    final override = _displayNameOverride?.trim();
+    if (override != null && override.isNotEmpty) {
+      return override;
+    }
+
+    try {
+      final payload = _decodeJwtPayload(current.idToken);
+      final customDisplayName =
+          payload['custom:display_name']?.toString().trim();
+      if (customDisplayName != null && customDisplayName.isNotEmpty) {
+        return customDisplayName;
+      }
+
+      final name = payload['name']?.toString().trim();
+      if (name != null && name.isNotEmpty) {
+        return name;
+      }
+    } catch (_) {
+      // Fall back to the signed-in email below.
+    }
+
+    return current.email;
+  }
+
+  bool get isDisplayNameLocked {
+    final current = _currentSession;
+    if (current == null) return false;
+    return _displayNameLockedOverride || _extractDisplayNameLocked(current.idToken);
+  }
+
+  Future<String> updateDisplayNameOnce(String displayName) async {
+    final current = _currentSession;
+    final normalized = displayName.trim();
+
+    if (current == null) {
+      throw Exception('Please sign in before updating your display name.');
+    }
+    if (normalized.length < 3 || normalized.length > 80) {
+      throw Exception('Display name must be between 3 and 80 characters.');
+    }
+    if (isDisplayNameLocked) {
+      throw Exception('Display name can only be changed once.');
+    }
+
+    final user = CognitoUser(
+      current.email,
+      _userPool,
+      signInUserSession: _toCognitoUserSession(current),
+    );
+
+    final updated = await user.updateAttributes([
+      CognitoUserAttribute(name: 'custom:display_name', value: normalized),
+      CognitoUserAttribute(name: 'custom:display_name_locked', value: 'true'),
+    ]);
+
+    if (!updated) {
+      throw Exception('Display name update failed.');
+    }
+
+    _displayNameOverride = normalized;
+    _displayNameLockedOverride = true;
+    await _storage.write(key: _displayNameOverrideKey, value: normalized);
+    await _storage.write(key: _displayNameLockedKey, value: 'true');
+
+    try {
+      await _refreshSession();
+    } catch (_) {
+      // Keep the local override if Cognito token refresh is delayed.
+    }
+
+    return normalized;
+  }
+
+  Future<void> ensureValidSession() async {
+    if (_currentSession == null) return;
+    if (!_currentSession!.isExpired) return;
+    await _refreshSession();
+  }
+
+  Future<void> _refreshSession() async {
+    final current = _currentSession;
+    if (current == null) {
+      throw Exception('No session available to refresh.');
+    }
+    if (current.refreshToken.isEmpty) {
+      throw Exception('No refresh token available.');
+    }
+
+    final user = CognitoUser(current.email, _userPool);
+    final refreshToken = CognitoRefreshToken(current.refreshToken);
+    final CognitoUserSession? refreshed =
+        await user.refreshSession(refreshToken);
+
+    if (refreshed == null) {
+      throw Exception('Failed to refresh Cognito session.');
+    }
+
+    final next = _sessionFromCognitoSession(
+      email: current.email,
+      session: refreshed,
+      fallbackRefreshToken: current.refreshToken,
+    );
+
+    await _persist(next);
+    _currentSession = next;
+  }
+
+  AuthSession _sessionFromCognitoSession({
+    required String email,
+    required CognitoUserSession session,
+    required String fallbackRefreshToken,
+  }) {
+    final idToken = session.getIdToken().getJwtToken() ?? '';
+    final accessToken = session.getAccessToken().getJwtToken() ?? '';
+    final refreshToken =
+        session.getRefreshToken()?.getToken() ?? fallbackRefreshToken;
+
+    if (idToken.isEmpty || accessToken.isEmpty) {
+      throw Exception('Cognito session returned empty tokens.');
+    }
+
+    final groups = _extractGroups(idToken);
+    final exp = _extractExp(idToken);
+    final userId = _extractSub(idToken);
+
+    return AuthSession(
+      userId: userId,
+      email: email,
+      idToken: idToken,
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+      groups: groups,
+      expiresAtEpochSeconds: exp,
+    );
   }
 
   Future<void> _persist(AuthSession session) async {
+    await _storage.write(key: _userIdKey, value: session.userId);
     await _storage.write(key: _emailKey, value: session.email);
     await _storage.write(key: _idTokenKey, value: session.idToken);
     await _storage.write(key: _accessTokenKey, value: session.accessToken);
@@ -169,6 +321,29 @@ class CognitoAuthService {
     if (exp is int) return exp;
     if (exp is num) return exp.toInt();
     return 0;
+  }
+
+  String _extractSub(String jwt) {
+    final payload = _decodeJwtPayload(jwt);
+    final sub = payload['sub'];
+    if (sub is String && sub.isNotEmpty) return sub;
+    throw Exception('Cognito token payload did not include a valid sub.');
+  }
+
+  bool _extractDisplayNameLocked(String jwt) {
+    final payload = _decodeJwtPayload(jwt);
+    final raw = payload['custom:display_name_locked'];
+    if (raw is bool) return raw;
+    if (raw is String) return raw.toLowerCase() == 'true';
+    return false;
+  }
+
+  CognitoUserSession _toCognitoUserSession(AuthSession session) {
+    return CognitoUserSession(
+      CognitoIdToken(session.idToken),
+      CognitoAccessToken(session.accessToken),
+      refreshToken: CognitoRefreshToken(session.refreshToken),
+    );
   }
 
   Map<String, dynamic> _decodeJwtPayload(String token) {

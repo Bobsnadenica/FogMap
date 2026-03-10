@@ -1,10 +1,12 @@
+import 'dart:convert';
+
 class LandmarkUploadTicket {
   const LandmarkUploadTicket({
     required this.landmarkId,
     required this.uploadToken,
     required this.objectKey,
     required this.uploadUrl,
-    required this.uploadFieldsJson,
+    required this.uploadFields,
     required this.expiresAt,
     required this.maxBytes,
   });
@@ -13,7 +15,7 @@ class LandmarkUploadTicket {
   final String uploadToken;
   final String objectKey;
   final String uploadUrl;
-  final String uploadFieldsJson;
+  final Map<String, String> uploadFields;
   final String expiresAt;
   final int maxBytes;
 
@@ -23,9 +25,36 @@ class LandmarkUploadTicket {
       uploadToken: json['uploadToken'] as String,
       objectKey: json['objectKey'] as String,
       uploadUrl: json['uploadUrl'] as String,
-      uploadFieldsJson: json['uploadFieldsJson'] as String,
+      uploadFields: _parseUploadFields(json['uploadFieldsJson']),
       expiresAt: json['expiresAt'] as String,
-      maxBytes: json['maxBytes'] as int? ?? 0,
+      maxBytes: (json['maxBytes'] as num?)?.toInt() ?? 0,
+    );
+  }
+
+  static Map<String, String> _parseUploadFields(dynamic rawUploadFields) {
+    dynamic decoded = rawUploadFields;
+
+    for (var depth = 0; depth < 3 && decoded is String; depth++) {
+      final trimmed = decoded.trim();
+      if (trimmed.isEmpty) {
+        break;
+      }
+
+      try {
+        decoded = jsonDecode(trimmed);
+      } catch (_) {
+        break;
+      }
+    }
+
+    if (decoded is Map) {
+      return Map<String, dynamic>.from(decoded).map(
+        (key, value) => MapEntry(key, value.toString()),
+      );
+    }
+
+    throw Exception(
+      'uploadFieldsJson did not contain a JSON object: ${decoded.runtimeType}',
     );
   }
 }

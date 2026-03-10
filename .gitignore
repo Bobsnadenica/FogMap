@@ -125,11 +125,9 @@ amplify_outputs*
 amplifyconfiguration*
 
 # Terraform
-# 1. Ignore the entire Terraform directory contents
-Terraform/**/*
-
-# 2. But do NOT ignore the directory itself (so we can look inside)
-!Terraform/
-
-# 3. Allow these specific files
-!Terraform/*.tfstate
+Terraform/.terraform/
+Terraform/.terraform.tfstate.lock.info
+Terraform/*.tfstate
+Terraform/*.tfstate.*
+Terraform/Archive.zip
+Terraform/lambda_bundle.zip

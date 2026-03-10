@@ -14,7 +14,6 @@ class AppTheme {
       primary: gold,
       secondary: parchment,
       surface: panel,
-      background: ink,
     );
 
     return ThemeData(

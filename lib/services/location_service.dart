@@ -6,7 +6,10 @@ class LocationService {
   Future<void> ensureReady({bool requireBackground = true}) async {
     final enabled = await Geolocator.isLocationServiceEnabled();
     if (!enabled) {
-      throw Exception('Location services are disabled on this device.');
+      await Geolocator.openLocationSettings();
+      throw Exception(
+        'Location services are disabled. Please enable location services and reopen the app.',
+      );
     }
 
     var permission = await Geolocator.checkPermission();
@@ -22,16 +25,29 @@ class LocationService {
     if (permission == LocationPermission.deniedForever) {
       await Geolocator.openAppSettings();
       throw Exception(
-        'Location permission is permanently denied. Open app settings and allow location access.',
+        'Location permission is permanently denied. I opened app settings so you can enable it.',
       );
     }
 
+    if (requireBackground && permission == LocationPermission.whileInUse) {
+      // Try one more permission request. On some platforms this may upgrade.
+      permission = await Geolocator.requestPermission();
+    }
+
     if (requireBackground && permission != LocationPermission.always) {
-      await Geolocator.openAppSettings();
+      if (Platform.isIOS || Platform.isAndroid) {
+        await Geolocator.openAppSettings();
+      }
       throw Exception(
         'Background tracking requires "Always" location permission. I opened app settings so you can enable it.',
       );
     }
+  }
+
+  Future<Position> getCurrentPosition() {
+    return Geolocator.getCurrentPosition(
+      locationSettings: _platformCurrentSettings(),
+    );
   }
 
   Stream<Position> stream() {
@@ -69,6 +85,30 @@ class LocationService {
     return const LocationSettings(
       accuracy: LocationAccuracy.high,
       distanceFilter: 8,
+    );
+  }
+
+  LocationSettings _platformCurrentSettings() {
+    if (Platform.isAndroid) {
+      return AndroidSettings(
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: 0,
+        intervalDuration: const Duration(seconds: 1),
+      );
+    }
+
+    if (Platform.isIOS) {
+      return AppleSettings(
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: 0,
+        activityType: ActivityType.fitness,
+        pauseLocationUpdatesAutomatically: false,
+      );
+    }
+
+    return const LocationSettings(
+      accuracy: LocationAccuracy.best,
+      distanceFilter: 0,
     );
   }
 }

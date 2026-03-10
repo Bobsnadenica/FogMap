@@ -77,11 +77,14 @@ class PlayerProfile {
     );
   }
 
-  static PlayerProfile createEmpty() {
+  static PlayerProfile createEmpty({
+    String id = 'local-player',
+    String displayName = 'Adventurer',
+  }) {
     final now = DateTime.now().toUtc().toIso8601String();
     return PlayerProfile(
-      id: 'local-player',
-      displayName: 'Adventurer',
+      id: id,
+      displayName: displayName,
       createdAtIso: now,
       updatedAtIso: now,
       reveals: const [],

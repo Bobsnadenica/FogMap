@@ -18,6 +18,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   final _passwordController = TextEditingController();
   final _confirmEmailController = TextEditingController();
   final _confirmCodeController = TextEditingController();
+  final _nameFocusNode = FocusNode();
 
   @override
   void initState() {
@@ -27,6 +28,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   @override
   void dispose() {
+    _nameFocusNode.dispose();
     _nameController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
@@ -37,9 +39,11 @@ class _ProfileScreenState extends State<ProfileScreen> {
 
   @override
   Widget build(BuildContext context) {
+    _syncNameController();
     return AnimatedBuilder(
       animation: widget.controller,
       builder: (context, _) {
+        final canChangeDisplayName = widget.controller.canChangeDisplayName;
         return Scaffold(
           appBar: AppBar(title: const Text('Profile')),
           body: ListView(
@@ -51,21 +55,35 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Text('Adventurer profile', style: Theme.of(context).textTheme.titleLarge),
+                      Text('Adventurer profile',
+                          style: Theme.of(context).textTheme.titleLarge),
                       const SizedBox(height: 12),
                       TextField(
                         controller: _nameController,
-                        decoration: const InputDecoration(labelText: 'Display name'),
+                        focusNode: _nameFocusNode,
+                        enabled: canChangeDisplayName,
+                        decoration:
+                            const InputDecoration(labelText: 'Display name'),
                       ),
+                      if (widget.controller.isSignedIn && !canChangeDisplayName)
+                        const Padding(
+                          padding: EdgeInsets.only(top: 8),
+                          child: Text(
+                            'Cloud display name is locked after your first change.',
+                          ),
+                        ),
                       const SizedBox(height: 12),
                       FilledButton(
-                        onPressed: () async {
-                          await widget.controller.setDisplayName(_nameController.text);
+                        onPressed: canChangeDisplayName
+                            ? () async {
+                          await widget.controller
+                              .setDisplayName(_nameController.text);
                           if (!context.mounted) return;
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(content: Text('Profile saved.')),
                           );
-                        },
+                        }
+                            : null,
                         child: const Text('Save profile'),
                       ),
                     ],
@@ -97,7 +115,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('Cloud account', style: Theme.of(context).textTheme.titleLarge),
+              Text('Cloud account',
+                  style: Theme.of(context).textTheme.titleLarge),
               const SizedBox(height: 8),
               Text(widget.controller.signedInEmail ?? ''),
               const SizedBox(height: 8),
@@ -126,16 +145,29 @@ class _ProfileScreenState extends State<ProfileScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('Cloud sign-in', style: Theme.of(context).textTheme.titleLarge),
+            Text('Cloud sign-in',
+                style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: 12),
             TextField(
               controller: _emailController,
+              keyboardType: TextInputType.emailAddress,
+              textInputAction: TextInputAction.next,
+              autocorrect: false,
+              enableSuggestions: false,
+              autofillHints: const [
+                AutofillHints.username,
+                AutofillHints.email
+              ],
               decoration: const InputDecoration(labelText: 'Email'),
             ),
             const SizedBox(height: 8),
             TextField(
               controller: _passwordController,
               obscureText: true,
+              textInputAction: TextInputAction.done,
+              autocorrect: false,
+              enableSuggestions: false,
+              autofillHints: const [AutofillHints.password],
               decoration: const InputDecoration(labelText: 'Password'),
             ),
             const SizedBox(height: 12),
@@ -171,7 +203,9 @@ class _ProfileScreenState extends State<ProfileScreen> {
                         );
                         if (!context.mounted) return;
                         ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('Account created. Confirm the code below.')),
+                          const SnackBar(
+                              content: Text(
+                                  'Account created. Confirm the code below.')),
                         );
                         _confirmEmailController.text = _emailController.text;
                       } catch (e) {
@@ -189,11 +223,16 @@ class _ProfileScreenState extends State<ProfileScreen> {
             const SizedBox(height: 16),
             TextField(
               controller: _confirmEmailController,
+              keyboardType: TextInputType.emailAddress,
+              textInputAction: TextInputAction.next,
+              autocorrect: false,
+              enableSuggestions: false,
               decoration: const InputDecoration(labelText: 'Confirm email'),
             ),
             const SizedBox(height: 8),
             TextField(
               controller: _confirmCodeController,
+              textInputAction: TextInputAction.done,
               decoration: const InputDecoration(labelText: 'Confirmation code'),
             ),
             const SizedBox(height: 8),
@@ -206,7 +245,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   );
                   if (!context.mounted) return;
                   ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Account confirmed. Now sign in.')),
+                    const SnackBar(
+                        content: Text('Account confirmed. Now sign in.')),
                   );
                 } catch (e) {
                   if (!context.mounted) return;
@@ -233,9 +273,12 @@ class _ProfileScreenState extends State<ProfileScreen> {
             Text('Progress', style: Theme.of(context).textTheme.titleLarge),
             const SizedBox(height: 12),
             _row('Reveals', '${widget.controller.reveals.length}'),
-            _row('Discovered cells', '${widget.controller.discoveredCellsCount}'),
-            _row('Coverage', '${widget.controller.coveragePercent.toStringAsFixed(6)}%'),
-            _row('Distance walked', '${widget.controller.totalKm.toStringAsFixed(2)} km'),
+            _row('Discovered cells',
+                '${widget.controller.discoveredCellsCount}'),
+            _row('Coverage',
+                '${widget.controller.coveragePercent.toStringAsFixed(6)}%'),
+            _row('Distance walked',
+                '${widget.controller.totalKm.toStringAsFixed(2)} km'),
           ],
         ),
       ),
@@ -310,7 +353,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
                   Expanded(
                     child: OutlinedButton(
                       onPressed: () async {
-                        final url = await widget.controller.getPendingLandmarkReviewUrl(item.landmarkId);
+                        final url = await widget.controller
+                            .getPendingLandmarkReviewUrl(item.landmarkId);
                         if (!context.mounted) return;
                         showDialog(
                           context: context,
@@ -366,6 +410,18 @@ class _ProfileScreenState extends State<ProfileScreen> {
           Text(value, style: const TextStyle(fontWeight: FontWeight.w700)),
         ],
       ),
+    );
+  }
+
+  void _syncNameController() {
+    if (_nameFocusNode.hasFocus) return;
+
+    final displayName = widget.controller.profile.displayName;
+    if (_nameController.text == displayName) return;
+
+    _nameController.value = TextEditingValue(
+      text: displayName,
+      selection: TextSelection.collapsed(offset: displayName.length),
     );
   }
 }

@@ -21,6 +21,7 @@ class MapScreen extends StatefulWidget {
 class _MapScreenState extends State<MapScreen> {
   int _mapRevision = 0;
   bool _mapReady = false;
+  bool _autoCenteredOnLiveFix = false;
 
   @override
   Widget build(BuildContext context) {
@@ -28,12 +29,21 @@ class _MapScreenState extends State<MapScreen> {
       animation: widget.controller,
       builder: (context, _) {
         final current = widget.controller.currentLatLng;
-        final center = current ??
-            const LatLng(
-              AppConstants.defaultLat,
-              AppConstants.defaultLon,
-            );
+        final center = widget.controller.mapCenter;
         final fogReveals = widget.controller.activeFogReveals;
+
+        if (_mapReady && current != null && !_autoCenteredOnLiveFix) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!mounted || !_mapReady || _autoCenteredOnLiveFix) {
+              return;
+            }
+            widget.controller.mapController.move(current, AppConstants.initialZoom);
+            setState(() {
+              _autoCenteredOnLiveFix = true;
+              _mapRevision++;
+            });
+          });
+        }
 
         return Scaffold(
           appBar: AppBar(
@@ -73,16 +83,21 @@ class _MapScreenState extends State<MapScreen> {
                           _mapReady = true;
                           _mapRevision++;
                         });
-                        widget.controller
-                            .refreshSharedViewport(widget.controller.mapController.camera);
+                        if (widget.controller.mapMode == MapMode.shared) {
+                          widget.controller.refreshSharedViewport(
+                            widget.controller.mapController.camera,
+                          );
+                        }
                       }
                     },
                     onPositionChanged: (_, __) {
                       if (mounted && _mapReady) {
                         setState(() => _mapRevision++);
-                        widget.controller.scheduleSharedViewportRefresh(
-                          widget.controller.mapController.camera,
-                        );
+                        if (widget.controller.mapMode == MapMode.shared) {
+                          widget.controller.scheduleSharedViewportRefresh(
+                            widget.controller.mapController.camera,
+                          );
+                        }
                       }
                     },
                   ),
@@ -92,8 +107,7 @@ class _MapScreenState extends State<MapScreen> {
                       userAgentPackageName:
                           AppConstants.userAgentPackageName,
                     ),
-                    if (widget.controller.revealLatLngs.length > 1 &&
-                        widget.controller.mapMode == MapMode.personal)
+                    if (widget.controller.revealLatLngs.length > 1)
                       PolylineLayer(
                         polylines: [
                           Polyline(
@@ -172,16 +186,19 @@ class _MapScreenState extends State<MapScreen> {
                 ),
               Positioned.fill(
                 child: IgnorePointer(
-                  child: Container(color: const Color(0x10170F07)),
+                  child: Container(
+                    color: const Color(0x10170F07),
+                  ),
                 ),
               ),
               if (_mapReady)
                 Positioned.fill(
                   child: IgnorePointer(
                     child: FogOfWarOverlay(
-                      key: ValueKey(_mapRevision),
                       camera: widget.controller.mapController.camera,
                       reveals: fogReveals,
+                      trailPoints: widget.controller.revealLatLngs,
+                      revision: _mapRevision,
                     ),
                   ),
                 ),
@@ -239,9 +256,13 @@ class _MapScreenState extends State<MapScreen> {
                         child: Text(
                           widget.controller.sharedLoading
                               ? 'Loading shared map...'
-                              : widget.controller.tracking
-                                  ? 'Tracking active'
-                                  : 'Tracking unavailable',
+                              : widget.controller.busy
+                                  ? 'Requesting location...'
+                                  : widget.controller.waitingForAccurateLocation
+                                      ? 'Waiting for accurate GPS fix...'
+                                      : widget.controller.tracking
+                                          ? 'Tracking active'
+                                          : 'Tracking unavailable',
                           style: const TextStyle(
                             fontWeight: FontWeight.w700,
                             color: Colors.white,
@@ -304,36 +325,44 @@ class _MapScreenState extends State<MapScreen> {
       height: 36,
       child: GestureDetector(
         onTap: () async {
-          final viewUrl =
-              await widget.controller.getLandmarkViewUrl(landmark.landmarkId);
-          if (!context.mounted) return;
-          showModalBottomSheet(
-            context: context,
-            builder: (_) => Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    landmark.title,
-                    style: Theme.of(context).textTheme.titleLarge,
-                  ),
-                  const SizedBox(height: 8),
-                  Text(landmark.description),
-                  const SizedBox(height: 12),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(12),
-                    child: Image.network(
-                      viewUrl,
-                      height: 220,
-                      fit: BoxFit.cover,
+          try {
+            final viewUrl = await widget.controller.getLandmarkViewUrl(
+              landmark.landmarkId,
+            );
+            if (!context.mounted) return;
+            showModalBottomSheet(
+              context: context,
+              builder: (_) => Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      landmark.title,
+                      style: Theme.of(context).textTheme.titleLarge,
                     ),
-                  ),
-                ],
+                    const SizedBox(height: 8),
+                    Text(landmark.description),
+                    const SizedBox(height: 12),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(12),
+                      child: Image.network(
+                        viewUrl,
+                        height: 220,
+                        fit: BoxFit.cover,
+                      ),
+                    ),
+                  ],
+                ),
               ),
-            ),
-          );
+            );
+          } catch (e) {
+            if (!context.mounted) return;
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(content: Text('Failed to load landmark image: $e')),
+            );
+          }
         },
         child: Container(
           decoration: BoxDecoration(
@@ -430,7 +459,10 @@ class _MapScreenState extends State<MapScreen> {
 }
 
 class _MiniStat extends StatelessWidget {
-  const _MiniStat({required this.label, required this.value});
+  const _MiniStat({
+    required this.label,
+    required this.value,
+  });
 
   final String label;
   final String value;
