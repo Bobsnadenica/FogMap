@@ -1,6 +1,8 @@
 from boto3.dynamodb.conditions import Key
 from shared.common import dynamodb, require_admin, s3, utc_now_iso
-from shared.config import APPROVED_LANDMARK_BUCKET, LANDMARKS_TABLE, PENDING_LANDMARK_BUCKET
+from shared.config import APPROVED_LANDMARK_BUCKET, LANDMARKS_TABLE, PENDING_LANDMARK_BUCKET, SHARED_TILE_CACHE_PREFIX, SHARED_TILE_CACHE_TTL_SECONDS
+from shared.discovery_cache import cache_object_key, store_cached_json
+from shared.shared_tiles import build_shared_tile_snapshot
 landmarks_table = dynamodb.Table(LANDMARKS_TABLE)
 
 def handler(event, context):
@@ -16,4 +18,12 @@ def handler(event, context):
     s3.delete_object(Bucket=PENDING_LANDMARK_BUCKET, Key=item["pendingObjectKey"])
     now_iso = utc_now_iso()
     landmarks_table.update_item(Key={"pk":item["pk"],"sk":item["sk"]}, UpdateExpression="SET #status = :status, moderationNotes = :notes, moderatedAt = :moderatedAt, approvedObjectKey = :approvedObjectKey, updatedAt = :updatedAt, gsi2pk = :gsi2pk, gsi2sk = :gsi2sk", ExpressionAttributeNames={"#status":"status"}, ExpressionAttributeValues={":status":status,":notes":notes,":moderatedAt":now_iso,":approvedObjectKey":approved_key,":updatedAt":now_iso,":gsi2pk":f"STATUS#{status}",":gsi2sk":f"{now_iso}#{landmark_id}"})
+    tile_id = item.get("tileId")
+    world_id = (item.get("worldId") or "global").strip().lower()
+    if tile_id:
+        store_cached_json(
+            cache_object_key(SHARED_TILE_CACHE_PREFIX, world_id, tile_id),
+            build_shared_tile_snapshot(world_id, tile_id),
+            SHARED_TILE_CACHE_TTL_SECONDS,
+        )
     return {"landmarkId":landmark_id,"status":status,"approvedObjectKey":approved_key}

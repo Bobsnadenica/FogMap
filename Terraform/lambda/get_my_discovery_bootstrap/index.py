@@ -3,6 +3,8 @@ import os
 from boto3.dynamodb.conditions import Key
 
 from shared.common import dynamodb
+from shared.config import USER_BOOTSTRAP_CACHE_PREFIX, USER_BOOTSTRAP_CACHE_TTL_SECONDS
+from shared.discovery_cache import cache_object_key, get_or_build_cached_json
 
 USER_DISCOVERIES_TABLE = os.environ["USER_DISCOVERIES_TABLE"]
 table = dynamodb.Table(USER_DISCOVERIES_TABLE)
@@ -14,11 +16,7 @@ def _user_id_from_event(event):
     return identity.get("sub") or claims.get("sub")
 
 
-def handler(event, context):
-    user_id = _user_id_from_event(event)
-    if not user_id:
-        raise Exception("Unauthorized")
-
+def _build_user_bootstrap(user_id):
     items = []
     last_evaluated_key = None
 
@@ -37,16 +35,27 @@ def handler(event, context):
         if not last_evaluated_key:
             break
 
-        if len(items) >= 50000:
-            break
+    return {
+        "userId": user_id,
+        "cells": [
+            {
+                "cellId": str(item["sk"]).replace("CELL#", ""),
+                "lat": float(item["lat"]),
+                "lon": float(item["lon"]),
+            }
+            for item in items
+        ],
+    }
 
-    cells = [
-        {
-            "cellId": str(item["sk"]).replace("CELL#", ""),
-            "lat": float(item["lat"]),
-            "lon": float(item["lon"]),
-        }
-        for item in items
-    ]
 
-    return {"cells": cells}
+def handler(event, context):
+    user_id = _user_id_from_event(event)
+    if not user_id:
+        raise Exception("Unauthorized")
+
+    cached = get_or_build_cached_json(
+        cache_object_key(USER_BOOTSTRAP_CACHE_PREFIX, user_id),
+        USER_BOOTSTRAP_CACHE_TTL_SECONDS,
+        lambda user_id=user_id: _build_user_bootstrap(user_id),
+    )
+    return {"cells": cached.get("cells", [])}

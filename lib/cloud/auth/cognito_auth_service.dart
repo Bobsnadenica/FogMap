@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:amazon_cognito_identity_dart_2/cognito.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../../core/constants/profile_icon_catalog.dart';
 import '../backend_config.dart';
 import 'auth_session.dart';
 
@@ -25,10 +26,27 @@ class CognitoAuthService {
   static const _userIdKey = 'cognito_user_id';
   static const _displayNameOverrideKey = 'cognito_display_name_override';
   static const _displayNameLockedKey = 'cognito_display_name_locked';
+  static const _profileIconOverrideKey = 'cognito_profile_icon_override';
+  static const _profileIconLockedKey = 'cognito_profile_icon_locked';
+  static const List<String> _ownedStorageKeys = [
+    _emailKey,
+    _idTokenKey,
+    _accessTokenKey,
+    _refreshTokenKey,
+    _groupsKey,
+    _expKey,
+    _userIdKey,
+    _displayNameOverrideKey,
+    _displayNameLockedKey,
+    _profileIconOverrideKey,
+    _profileIconLockedKey,
+  ];
 
   AuthSession? _currentSession;
   String? _displayNameOverride;
   bool _displayNameLockedOverride = false;
+  String? _profileIconOverride;
+  bool _profileIconLockedOverride = false;
 
   AuthSession? get currentSession => _currentSession;
 
@@ -46,6 +64,9 @@ class CognitoAuthService {
       key: _displayNameOverrideKey,
     );
     final displayNameLocked = await _storage.read(key: _displayNameLockedKey);
+    final profileIconOverride =
+        await _storage.read(key: _profileIconOverrideKey);
+    final profileIconLocked = await _storage.read(key: _profileIconLockedKey);
 
     if (email == null ||
         userId == null ||
@@ -56,6 +77,8 @@ class CognitoAuthService {
       _currentSession = null;
       _displayNameOverride = null;
       _displayNameLockedOverride = false;
+      _profileIconOverride = null;
+      _profileIconLockedOverride = false;
       return;
     }
 
@@ -63,6 +86,10 @@ class CognitoAuthService {
         ? null
         : displayNameOverride?.trim();
     _displayNameLockedOverride = displayNameLocked == 'true';
+    _profileIconOverride = profileIconOverride?.trim().isEmpty == true
+        ? null
+        : profileIconOverride?.trim();
+    _profileIconLockedOverride = profileIconLocked == 'true';
 
     final groups = groupsRaw == null || groupsRaw.isEmpty
         ? <String>[]
@@ -95,14 +122,40 @@ class CognitoAuthService {
     required String email,
     required String password,
     required String displayName,
+    required String profileIcon,
   }) async {
-    await _userPool.signUp(
-      email.trim(),
-      password,
-      userAttributes: [
-        AttributeArg(name: 'custom:display_name', value: displayName.trim()),
-      ],
-    );
+    final normalizedEmail = email.trim();
+    final normalizedDisplayName = displayName.trim();
+    final normalizedProfileIcon = profileIcon.trim();
+
+    try {
+      await _userPool.signUp(
+        normalizedEmail,
+        password,
+        userAttributes: [
+          AttributeArg(
+            name: 'custom:display_name',
+            value: normalizedDisplayName,
+          ),
+          AttributeArg(
+            name: 'custom:profile_icon',
+            value: normalizedProfileIcon,
+          ),
+        ],
+      );
+    } catch (error) {
+      if (!_isMissingProfileIconAttributeError(error)) rethrow;
+      await _userPool.signUp(
+        normalizedEmail,
+        password,
+        userAttributes: [
+          AttributeArg(
+            name: 'custom:display_name',
+            value: normalizedDisplayName,
+          ),
+        ],
+      );
+    }
   }
 
   Future<void> confirmSignUp({
@@ -136,6 +189,10 @@ class CognitoAuthService {
       fallbackRefreshToken: '',
     );
 
+    _displayNameOverride = null;
+    _displayNameLockedOverride = _extractDisplayNameLocked(authSession.idToken);
+    _profileIconOverride = null;
+    _profileIconLockedOverride = _extractProfileIconLocked(authSession.idToken);
     await _persist(authSession);
     _currentSession = authSession;
     return authSession;
@@ -143,7 +200,13 @@ class CognitoAuthService {
 
   Future<void> signOut() async {
     _currentSession = null;
-    await _storage.deleteAll();
+    _displayNameOverride = null;
+    _displayNameLockedOverride = false;
+    _profileIconOverride = null;
+    _profileIconLockedOverride = false;
+    for (final key in _ownedStorageKeys) {
+      await _storage.delete(key: key);
+    }
   }
 
   Future<String?> getIdToken() async {
@@ -181,10 +244,43 @@ class CognitoAuthService {
     return current.email;
   }
 
+  String get currentProfileIcon {
+    final current = _currentSession;
+    if (current == null) return ProfileIconCatalog.defaultIcon;
+
+    final override = _profileIconOverride?.trim();
+    if (override != null && override.isNotEmpty) {
+      return override;
+    }
+
+    try {
+      final payload = _decodeJwtPayload(current.idToken);
+      final customProfileIcon =
+          payload['custom:profile_icon']?.toString().trim();
+      if (customProfileIcon != null &&
+          customProfileIcon.isNotEmpty &&
+          ProfileIconCatalog.isAllowed(customProfileIcon)) {
+        return customProfileIcon;
+      }
+    } catch (_) {
+      // Fall back to the default icon below.
+    }
+
+    return ProfileIconCatalog.defaultIcon;
+  }
+
   bool get isDisplayNameLocked {
     final current = _currentSession;
     if (current == null) return false;
-    return _displayNameLockedOverride || _extractDisplayNameLocked(current.idToken);
+    return _displayNameLockedOverride ||
+        _extractDisplayNameLocked(current.idToken);
+  }
+
+  bool get isProfileIconLocked {
+    final current = _currentSession;
+    if (current == null) return false;
+    return _profileIconLockedOverride ||
+        _extractProfileIconLocked(current.idToken);
   }
 
   Future<String> updateDisplayNameOnce(String displayName) async {
@@ -220,6 +316,62 @@ class CognitoAuthService {
     _displayNameLockedOverride = true;
     await _storage.write(key: _displayNameOverrideKey, value: normalized);
     await _storage.write(key: _displayNameLockedKey, value: 'true');
+
+    try {
+      await _refreshSession();
+    } catch (_) {
+      // Keep the local override if Cognito token refresh is delayed.
+    }
+
+    return normalized;
+  }
+
+  Future<String> updateProfileIconOnce(String profileIcon) async {
+    final current = _currentSession;
+    final normalized = profileIcon.trim();
+
+    if (current == null) {
+      throw Exception('Please sign in before updating your profile icon.');
+    }
+    if (!ProfileIconCatalog.isAllowed(normalized)) {
+      throw Exception('Please choose one of the available profile icons.');
+    }
+    if (isProfileIconLocked) {
+      throw Exception('Profile icon can only be changed once.');
+    }
+
+    final user = CognitoUser(
+      current.email,
+      _userPool,
+      signInUserSession: _toCognitoUserSession(current),
+    );
+
+    final bool updated;
+    try {
+      updated = await user.updateAttributes([
+        CognitoUserAttribute(name: 'custom:profile_icon', value: normalized),
+        CognitoUserAttribute(
+          name: 'custom:profile_icon_locked',
+          value: 'true',
+        ),
+      ]);
+    } catch (error) {
+      if (_isMissingProfileIconAttributeError(error)) {
+        throw Exception(
+          'Profile icons require the latest backend deployment before they can be changed for signed-in users.',
+        );
+      }
+      rethrow;
+    }
+
+    if (!updated) {
+      throw Exception('Profile icon update failed.');
+    }
+
+    _profileIconOverride = normalized;
+    _profileIconLockedOverride = true;
+    await _storage.write(key: _profileIconOverrideKey, value: normalized);
+    await _storage.write(key: _profileIconLockedKey, value: 'true');
 
     try {
       await _refreshSession();
@@ -336,6 +488,26 @@ class CognitoAuthService {
     if (raw is bool) return raw;
     if (raw is String) return raw.toLowerCase() == 'true';
     return false;
+  }
+
+  bool _extractProfileIconLocked(String jwt) {
+    final payload = _decodeJwtPayload(jwt);
+    final raw = payload['custom:profile_icon_locked'];
+    if (raw is bool) return raw;
+    if (raw is String) return raw.toLowerCase() == 'true';
+    return false;
+  }
+
+  bool _isMissingProfileIconAttributeError(Object error) {
+    final text = error.toString().toLowerCase();
+    return (text.contains('profile_icon') ||
+            text.contains('profile icon') ||
+            text.contains('custom:profile_icon')) &&
+        (text.contains('invalid') ||
+            text.contains('not exist') ||
+            text.contains('does not exist') ||
+            text.contains('unknown') ||
+            text.contains('unsupported'));
   }
 
   CognitoUserSession _toCognitoUserSession(AuthSession session) {

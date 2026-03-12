@@ -19,6 +19,9 @@ class AppSyncService {
   final http.Client _client;
   final bool _ownsClient;
   bool _disposed = false;
+  bool _supportsProfileIconSync = true;
+  bool _supportsProfileIconViewport = true;
+  bool _supportsSharedPresenceQuery = true;
 
   Future<void> syncDiscoveries({
     required List<CloudDiscoveryCell> cells,
@@ -26,9 +29,28 @@ class AppSyncService {
     required double? currentLon,
     required int mapZoom,
     required String displayName,
+    required String profileIcon,
   }) async {
-    await _post(
-      query: '''
+    final variables = {
+      'worldId': BackendConfig.defaultWorldId,
+      'cellsJson': jsonEncode(cells.map((e) => e.toJson()).toList()),
+      'currentLat': currentLat,
+      'currentLon': currentLon,
+      'mapZoom': mapZoom,
+      'displayName': displayName,
+    };
+
+    if (!_supportsProfileIconSync) {
+      await _post(
+        query: _legacySyncDiscoveriesMutation,
+        variables: variables,
+      );
+      return;
+    }
+
+    try {
+      await _post(
+        query: '''
 mutation SyncDiscoveries(
   \$worldId: String
   \$cellsJson: AWSJSON!
@@ -36,6 +58,7 @@ mutation SyncDiscoveries(
   \$currentLon: Float
   \$mapZoom: Int
   \$displayName: String
+  \$profileIcon: String
 ) {
   syncDiscoveries(
     worldId: \$worldId
@@ -44,6 +67,7 @@ mutation SyncDiscoveries(
     currentLon: \$currentLon
     mapZoom: \$mapZoom
     displayName: \$displayName
+    profileIcon: \$profileIcon
   ) {
     acceptedCellCount
     newPersonalCellCount
@@ -53,15 +77,19 @@ mutation SyncDiscoveries(
   }
 }
 ''',
-      variables: {
-        'worldId': BackendConfig.defaultWorldId,
-        'cellsJson': jsonEncode(cells.map((e) => e.toJson()).toList()),
-        'currentLat': currentLat,
-        'currentLon': currentLon,
-        'mapZoom': mapZoom,
-        'displayName': displayName,
-      },
-    );
+        variables: {
+          ...variables,
+          'profileIcon': profileIcon,
+        },
+      );
+    } catch (e) {
+      if (!_isLegacyProfileIconSchemaError(e)) rethrow;
+      _supportsProfileIconSync = false;
+      await _post(
+        query: _legacySyncDiscoveriesMutation,
+        variables: variables,
+      );
+    }
   }
 
   Future<SharedViewportResponse> getSharedViewport({
@@ -71,45 +99,138 @@ mutation SyncDiscoveries(
     required double maxLon,
     required int zoom,
   }) async {
-    final data = await _post(
-      query: '''
+    final variables = {
+      'worldId': BackendConfig.defaultWorldId,
+      'minLat': minLat,
+      'maxLat': maxLat,
+      'minLon': minLon,
+      'maxLon': maxLon,
+      'zoom': zoom,
+    };
+
+    if (!_supportsProfileIconViewport) {
+      final data = await _post(
+        query: _legacySharedViewportQuery,
+        variables: variables,
+      );
+      return SharedViewportResponse.fromJson(_asMap(data['getSharedViewport']));
+    }
+
+    try {
+      final data = await _post(
+        query: r'''
 query GetSharedViewport(
-  \$worldId: String
-  \$minLat: Float!
-  \$maxLat: Float!
-  \$minLon: Float!
-  \$maxLon: Float!
-  \$zoom: Int!
+  $worldId: String
+  $minLat: Float!
+  $maxLat: Float!
+  $minLon: Float!
+  $maxLon: Float!
+  $zoom: Int!
 ) {
   getSharedViewport(
-    worldId: \$worldId
-    minLat: \$minLat
-    maxLat: \$maxLat
-    minLon: \$minLon
-    maxLon: \$maxLon
-    zoom: \$zoom
+    worldId: $worldId
+    minLat: $minLat
+    maxLat: $maxLat
+    minLon: $minLon
+    maxLon: $maxLon
+    zoom: $zoom
   ) {
     worldId
     generatedAt
     cells { cellId lat lon discovererCount tileId lastDiscoveredAt }
-    players { userId displayName lat lon lastSeenAt }
+    players { userId displayName profileIcon lat lon lastSeenAt }
     landmarks { landmarkId title description category lat lon status approvedObjectKey createdAt }
   }
 }
 ''',
-      variables: {
-        'worldId': BackendConfig.defaultWorldId,
-        'minLat': minLat,
-        'maxLat': maxLat,
-        'minLon': minLon,
-        'maxLon': maxLon,
-        'zoom': zoom,
-      },
-    );
+        variables: variables,
+      );
 
-    return SharedViewportResponse.fromJson(
-      _asMap(data['getSharedViewport']),
-    );
+      return SharedViewportResponse.fromJson(
+        _asMap(data['getSharedViewport']),
+      );
+    } catch (e) {
+      if (!_isLegacyProfileIconSchemaError(e)) rethrow;
+      _supportsProfileIconViewport = false;
+      final data = await _post(
+        query: _legacySharedViewportQuery,
+        variables: variables,
+      );
+      return SharedViewportResponse.fromJson(_asMap(data['getSharedViewport']));
+    }
+  }
+
+  Future<List<SharedPlayer>> getSharedPresence({
+    required double minLat,
+    required double maxLat,
+    required double minLon,
+    required double maxLon,
+    required int zoom,
+  }) async {
+    final variables = {
+      'worldId': BackendConfig.defaultWorldId,
+      'minLat': minLat,
+      'maxLat': maxLat,
+      'minLon': minLon,
+      'maxLon': maxLon,
+      'zoom': zoom,
+    };
+
+    if (!_supportsSharedPresenceQuery) {
+      return (await getSharedViewport(
+        minLat: minLat,
+        maxLat: maxLat,
+        minLon: minLon,
+        maxLon: maxLon,
+        zoom: zoom,
+      ))
+          .players;
+    }
+
+    try {
+      final data = await _post(
+        query: r'''
+query GetSharedPresence(
+  $worldId: String
+  $minLat: Float!
+  $maxLat: Float!
+  $minLon: Float!
+  $maxLon: Float!
+  $zoom: Int!
+) {
+  getSharedPresence(
+    worldId: $worldId
+    minLat: $minLat
+    maxLat: $maxLat
+    minLon: $minLon
+    maxLon: $maxLon
+    zoom: $zoom
+  ) {
+    worldId
+    generatedAt
+    players { userId displayName profileIcon lat lon lastSeenAt }
+  }
+}
+''',
+        variables: variables,
+      );
+
+      final root = _asMap(data['getSharedPresence']);
+      return ((root['players'] as List?) ?? const [])
+          .map((e) => SharedPlayer.fromJson(_asMap(e)))
+          .toList(growable: false);
+    } catch (e) {
+      if (!_isLegacyFieldUndefinedError(e, 'getsharedpresence')) rethrow;
+      _supportsSharedPresenceQuery = false;
+      return (await getSharedViewport(
+        minLat: minLat,
+        maxLat: maxLat,
+        minLon: minLon,
+        maxLon: maxLon,
+        zoom: zoom,
+      ))
+          .players;
+    }
   }
 
   Future<LandmarkUploadTicket> createLandmarkUploadTicket({
@@ -311,16 +432,14 @@ query GetMyDiscoveryBootstrap {
 
     final root = _asMap(data['getMyDiscoveryBootstrap']);
     final items = (root['cells'] as List?) ?? const [];
-    return items
-        .map((e) {
-          final map = _asMap(e);
-          return CloudDiscoveryCell(
-            cellId: map['cellId'] as String,
-            latitude: (map['lat'] as num).toDouble(),
-            longitude: (map['lon'] as num).toDouble(),
-          );
-        })
-        .toList();
+    return items.map((e) {
+      final map = _asMap(e);
+      return CloudDiscoveryCell(
+        cellId: map['cellId'] as String,
+        latitude: (map['lat'] as num).toDouble(),
+        longitude: (map['lon'] as num).toDouble(),
+      );
+    }).toList();
   }
 
   void dispose() {
@@ -344,17 +463,24 @@ query GetMyDiscoveryBootstrap {
       throw Exception('Please sign in to use cloud features.');
     }
 
-    final response = await _client.post(
-      Uri.parse(BackendConfig.appSyncGraphqlUrl),
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': token,
-      },
-      body: jsonEncode({
-        'query': query,
-        'variables': variables,
-      }),
-    );
+    final response = await _client
+        .post(
+          Uri.parse(BackendConfig.appSyncGraphqlUrl),
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': token,
+          },
+          body: jsonEncode({
+            'query': query,
+            'variables': variables,
+          }),
+        )
+        .timeout(
+          const Duration(seconds: 20),
+          onTimeout: () => throw Exception(
+            'Cloud request timed out. Check your network connection and try again.',
+          ),
+        );
 
     if (response.statusCode < 200 || response.statusCode >= 300) {
       throw Exception(
@@ -365,8 +491,14 @@ query GetMyDiscoveryBootstrap {
     final decoded = jsonDecode(response.body) as Map<String, dynamic>;
     final errors = decoded['errors'] as List<dynamic>?;
     if (errors != null && errors.isNotEmpty) {
-      final first = _asMap(errors.first);
-      throw Exception(first['message']?.toString() ?? 'Unknown GraphQL error');
+      final messages = errors
+          .map((error) => _asMap(error)['message']?.toString().trim())
+          .whereType<String>()
+          .where((message) => message.isNotEmpty)
+          .toList();
+      throw Exception(
+        messages.isEmpty ? 'Unknown GraphQL error' : messages.join(' | '),
+      );
     }
 
     return _asMap(decoded['data']);
@@ -383,4 +515,77 @@ query GetMyDiscoveryBootstrap {
       'Expected object but got ${value.runtimeType}: $value',
     );
   }
+
+  bool _isLegacyProfileIconSchemaError(Object error) {
+    final text = error.toString().toLowerCase();
+    final referencesProfileIcon = text.contains('profileicon') ||
+        text.contains('profile_icon') ||
+        text.contains('profile icon');
+    return referencesProfileIcon && _isValidationSchemaErrorText(text);
+  }
+
+  bool _isLegacyFieldUndefinedError(Object error, String fieldName) {
+    final text = error.toString().toLowerCase();
+    return text.contains(fieldName.toLowerCase()) &&
+        _isValidationSchemaErrorText(text);
+  }
+
+  bool _isValidationSchemaErrorText(String text) {
+    return text.contains('fieldundefined') ||
+        text.contains('field undefined') ||
+        text.contains('unknown argument') ||
+        text.contains('validation error');
+  }
+
+  static const String _legacySyncDiscoveriesMutation = '''
+mutation SyncDiscoveries(
+  \$worldId: String
+  \$cellsJson: AWSJSON!
+  \$currentLat: Float
+  \$currentLon: Float
+  \$mapZoom: Int
+  \$displayName: String
+) {
+  syncDiscoveries(
+    worldId: \$worldId
+    cellsJson: \$cellsJson
+    currentLat: \$currentLat
+    currentLon: \$currentLon
+    mapZoom: \$mapZoom
+    displayName: \$displayName
+  ) {
+    acceptedCellCount
+    newPersonalCellCount
+    updatedSharedCellCount
+    trackingActive
+    timestamp
+  }
+}
+''';
+
+  static const String _legacySharedViewportQuery = '''
+query GetSharedViewport(
+  \$worldId: String
+  \$minLat: Float!
+  \$maxLat: Float!
+  \$minLon: Float!
+  \$maxLon: Float!
+  \$zoom: Int!
+) {
+  getSharedViewport(
+    worldId: \$worldId
+    minLat: \$minLat
+    maxLat: \$maxLat
+    minLon: \$minLon
+    maxLon: \$maxLon
+    zoom: \$zoom
+  ) {
+    worldId
+    generatedAt
+    cells { cellId lat lon discovererCount tileId lastDiscoveredAt }
+    players { userId displayName lat lon lastSeenAt }
+    landmarks { landmarkId title description category lat lon status approvedObjectKey createdAt }
+  }
+}
+''';
 }

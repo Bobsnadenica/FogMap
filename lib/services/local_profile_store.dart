@@ -29,9 +29,21 @@ class LocalProfileStore {
       return empty;
     }
 
-    final raw = await file.readAsString();
-    final jsonMap = jsonDecode(raw) as Map<String, dynamic>;
-    return PlayerProfile.fromJson(jsonMap);
+    try {
+      final raw = await file.readAsString();
+      final jsonMap = jsonDecode(raw) as Map<String, dynamic>;
+      return PlayerProfile.fromJson(jsonMap);
+    } catch (_) {
+      final backupPath =
+          '${file.path}.corrupt-${DateTime.now().millisecondsSinceEpoch}';
+      await file.copy(backupPath);
+      final empty = PlayerProfile.createEmpty(
+        id: profileId ?? 'local-player',
+        displayName: defaultDisplayName ?? 'Adventurer',
+      );
+      await save(empty, profileKey: profileKey);
+      return empty;
+    }
   }
 
   Future<void> save(
@@ -40,7 +52,10 @@ class LocalProfileStore {
   }) async {
     final file = await _profileFile(profileKey: profileKey);
     final encoder = const JsonEncoder.withIndent('  ');
-    await file.writeAsString(encoder.convert(profile.toJson()));
+    await file.writeAsString(
+      encoder.convert(profile.toJson()),
+      flush: true,
+    );
   }
 
   String _fileNameForKey(String profileKey) {

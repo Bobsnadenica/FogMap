@@ -1,15 +1,19 @@
+from datetime import datetime
 from time import time
-from boto3.dynamodb.conditions import Key
 from shared.common import dynamodb, utc_now_iso
-from shared.config import LANDMARKS_TABLE, PLAYER_PRESENCE_TABLE, SHARED_CELLS_TABLE
+from shared.config import LANDMARKS_TABLE, PLAYER_PRESENCE_TABLE, SHARED_CELLS_TABLE, SHARED_TILE_CACHE_PREFIX, SHARED_TILE_CACHE_TTL_SECONDS
+from shared.discovery_cache import cache_object_key, get_or_build_cached_json
 from shared.geo import in_bounds, tile_ids_for_bounds
+from shared.shared_tiles import build_shared_tile_snapshot
 
-shared_cells_table = dynamodb.Table(SHARED_CELLS_TABLE)
 presence_table = dynamodb.Table(PLAYER_PRESENCE_TABLE)
-landmarks_table = dynamodb.Table(LANDMARKS_TABLE)
 VIEWPORT_CACHE = {}
-VIEWPORT_CACHE_TTL_SECONDS = 8
+VIEWPORT_CACHE_TTL_SECONDS = 3
 VIEWPORT_CACHE_MAX_ENTRIES = 64
+ACTIVE_PRESENCE_MAX_AGE_SECONDS = 15
+PRESENCE_TILE_CACHE = {}
+PRESENCE_TILE_CACHE_TTL_SECONDS = 3
+PRESENCE_TILE_CACHE_MAX_ENTRIES = 256
 
 
 def _cache_key(world_id, tile_ids):
@@ -33,27 +37,63 @@ def _prune_cache(now_epoch):
         VIEWPORT_CACHE.pop(oldest_key, None)
 
 
-def _query_shared_cells(world_id, tile_id):
-    return shared_cells_table.query(
-        KeyConditionExpression=Key("pk").eq(f"WORLD#{world_id}#TILE#{tile_id}"),
-        ProjectionExpression="sk, lat, lon, discovererCount, tileId, lastDiscoveredAt",
-    ).get("Items", [])
+def _presence_cache_key(world_id, tile_id):
+    return f"{world_id}|{tile_id}"
+
+
+def _prune_presence_cache(now_epoch):
+    expired = [
+        key
+        for key, entry in PRESENCE_TILE_CACHE.items()
+        if entry["expiresAtEpoch"] <= now_epoch
+    ]
+    for key in expired:
+        PRESENCE_TILE_CACHE.pop(key, None)
+
+    while len(PRESENCE_TILE_CACHE) > PRESENCE_TILE_CACHE_MAX_ENTRIES:
+        oldest_key = min(
+            PRESENCE_TILE_CACHE,
+            key=lambda key: PRESENCE_TILE_CACHE[key]["expiresAtEpoch"],
+        )
+        PRESENCE_TILE_CACHE.pop(oldest_key, None)
 
 
 def _query_presence(world_id, tile_id):
     return presence_table.query(
         KeyConditionExpression=Key("pk").eq(f"WORLD#{world_id}#TILE#{tile_id}"),
-        ProjectionExpression="userId, displayName, lat, lon, lastSeenAt, #ttl",
+        ProjectionExpression="userId, displayName, profileIcon, lat, lon, lastSeenAt, #ttl",
         ExpressionAttributeNames={"#ttl": "ttl"},
     ).get("Items", [])
 
 
-def _query_landmarks(world_id, tile_id):
-    return landmarks_table.query(
-        KeyConditionExpression=Key("pk").eq(f"WORLD#{world_id}#TILE#{tile_id}"),
-        ProjectionExpression="landmarkId, title, description, category, lat, lon, #status, approvedObjectKey, createdAt",
-        ExpressionAttributeNames={"#status": "status"},
-    ).get("Items", [])
+def _cached_presence(world_id, tile_id, now_epoch):
+    _prune_presence_cache(now_epoch)
+    cache_key = _presence_cache_key(world_id, tile_id)
+    cached = PRESENCE_TILE_CACHE.get(cache_key)
+    if cached and cached["expiresAtEpoch"] > now_epoch:
+        return cached["payload"]
+
+    payload = _query_presence(world_id, tile_id)
+    PRESENCE_TILE_CACHE[cache_key] = {
+        "expiresAtEpoch": now_epoch + PRESENCE_TILE_CACHE_TTL_SECONDS,
+        "payload": payload,
+    }
+    _prune_presence_cache(now_epoch)
+    return payload
+
+
+def _is_recent_presence(last_seen_at, now_epoch):
+    if not last_seen_at:
+        return False
+
+    try:
+        normalized = str(last_seen_at).replace("Z", "+00:00")
+        seen_epoch = int(datetime.fromisoformat(normalized).timestamp())
+    except ValueError:
+        return False
+
+    return seen_epoch >= (now_epoch - ACTIVE_PRESENCE_MAX_AGE_SECONDS)
+
 
 def handler(event, context):
     args = event.get("arguments") or {}
@@ -78,11 +118,20 @@ def handler(event, context):
     landmarks_by_id = {}
 
     for tile_id in tile_ids:
-        for item in _query_shared_cells(world_id, tile_id):
+        tile_snapshot = get_or_build_cached_json(
+            cache_object_key(SHARED_TILE_CACHE_PREFIX, world_id, tile_id),
+            SHARED_TILE_CACHE_TTL_SECONDS,
+            lambda world_id=world_id, tile_id=tile_id: build_shared_tile_snapshot(
+                world_id,
+                tile_id,
+            ),
+        )
+
+        for item in tile_snapshot.get("cells", []):
             lat = float(item["lat"])
             lon = float(item["lon"])
             if in_bounds(lat, lon, min_lat, max_lat, min_lon, max_lon):
-                cell_id = str(item["sk"]).replace("CELL#", "")
+                cell_id = item["cellId"]
                 existing = cells_by_id.get(cell_id)
                 candidate = {
                     "cellId": cell_id,
@@ -95,7 +144,7 @@ def handler(event, context):
                 if existing is None or candidate["lastDiscoveredAt"] > existing["lastDiscoveredAt"]:
                     cells_by_id[cell_id] = candidate
 
-        for item in _query_presence(world_id, tile_id):
+        for item in _cached_presence(world_id, tile_id, now_epoch):
             ttl = int(item.get("ttl", 0))
             if ttl and ttl <= now_epoch:
                 continue
@@ -107,16 +156,17 @@ def handler(event, context):
                 candidate = {
                     "userId": item["userId"],
                     "displayName": item.get("displayName", "Explorer"),
+                    "profileIcon": item.get("profileIcon", "🛡️"),
                     "lat": lat,
                     "lon": lon,
                     "lastSeenAt": item.get("lastSeenAt", utc_now_iso()),
                 }
+                if not _is_recent_presence(candidate["lastSeenAt"], now_epoch):
+                    continue
                 if existing is None or candidate["lastSeenAt"] > existing["lastSeenAt"]:
                     players_by_user[item["userId"]] = candidate
 
-        for item in _query_landmarks(world_id, tile_id):
-            if item.get("status") != "APPROVED":
-                continue
+        for item in tile_snapshot.get("landmarks", []):
             lat = float(item["lat"])
             lon = float(item["lon"])
             if in_bounds(lat, lon, min_lat, max_lat, min_lon, max_lon):

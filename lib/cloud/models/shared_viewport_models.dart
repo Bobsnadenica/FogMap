@@ -25,12 +25,22 @@ class SharedCell {
       lastDiscoveredAt: json['lastDiscoveredAt'] as String? ?? '',
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'cellId': cellId,
+        'lat': lat,
+        'lon': lon,
+        'discovererCount': discovererCount,
+        'tileId': tileId,
+        'lastDiscoveredAt': lastDiscoveredAt,
+      };
 }
 
 class SharedPlayer {
   const SharedPlayer({
     required this.userId,
     required this.displayName,
+    required this.profileIcon,
     required this.lat,
     required this.lon,
     required this.lastSeenAt,
@@ -38,6 +48,7 @@ class SharedPlayer {
 
   final String userId;
   final String displayName;
+  final String profileIcon;
   final double lat;
   final double lon;
   final String lastSeenAt;
@@ -46,11 +57,21 @@ class SharedPlayer {
     return SharedPlayer(
       userId: json['userId'] as String,
       displayName: json['displayName'] as String? ?? 'Explorer',
+      profileIcon: json['profileIcon'] as String? ?? '🛡️',
       lat: (json['lat'] as num).toDouble(),
       lon: (json['lon'] as num).toDouble(),
       lastSeenAt: json['lastSeenAt'] as String? ?? '',
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'userId': userId,
+        'displayName': displayName,
+        'profileIcon': profileIcon,
+        'lat': lat,
+        'lon': lon,
+        'lastSeenAt': lastSeenAt,
+      };
 }
 
 class SharedLandmark {
@@ -89,6 +110,18 @@ class SharedLandmark {
       createdAt: json['createdAt'] as String?,
     );
   }
+
+  Map<String, dynamic> toJson() => {
+        'landmarkId': landmarkId,
+        'title': title,
+        'description': description,
+        'category': category,
+        'lat': lat,
+        'lon': lon,
+        'status': status,
+        'approvedObjectKey': approvedObjectKey,
+        'createdAt': createdAt,
+      };
 }
 
 class SharedViewportResponse {
@@ -98,6 +131,7 @@ class SharedViewportResponse {
     required this.players,
     required this.landmarks,
     required this.generatedAt,
+    this.hasTilePayload = true,
   });
 
   final String worldId;
@@ -105,6 +139,7 @@ class SharedViewportResponse {
   final List<SharedPlayer> players;
   final List<SharedLandmark> landmarks;
   final String generatedAt;
+  final bool hasTilePayload;
 
   factory SharedViewportResponse.empty() {
     return const SharedViewportResponse(
@@ -113,6 +148,7 @@ class SharedViewportResponse {
       players: <SharedPlayer>[],
       landmarks: <SharedLandmark>[],
       generatedAt: '',
+      hasTilePayload: false,
     );
   }
 
@@ -123,12 +159,89 @@ class SharedViewportResponse {
           .map((e) => SharedCell.fromJson(Map<String, dynamic>.from(e as Map)))
           .toList(),
       players: ((json['players'] as List?) ?? const [])
-          .map((e) => SharedPlayer.fromJson(Map<String, dynamic>.from(e as Map)))
+          .map(
+              (e) => SharedPlayer.fromJson(Map<String, dynamic>.from(e as Map)))
           .toList(),
       landmarks: ((json['landmarks'] as List?) ?? const [])
-          .map((e) => SharedLandmark.fromJson(Map<String, dynamic>.from(e as Map)))
+          .map((e) =>
+              SharedLandmark.fromJson(Map<String, dynamic>.from(e as Map)))
           .toList(),
       generatedAt: json['generatedAt'] as String? ?? '',
+      hasTilePayload: true,
     );
   }
+
+  SharedViewportResponse copyWithMetadata({bool? hasTilePayload}) {
+    return SharedViewportResponse(
+      worldId: worldId,
+      cells: cells,
+      players: players,
+      landmarks: landmarks,
+      generatedAt: generatedAt,
+      hasTilePayload: hasTilePayload ?? this.hasTilePayload,
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'worldId': worldId,
+        'cells': cells.map((cell) => cell.toJson()).toList(growable: false),
+        'players':
+            players.map((player) => player.toJson()).toList(growable: false),
+        'landmarks': landmarks
+            .map((landmark) => landmark.toJson())
+            .toList(growable: false),
+        'generatedAt': generatedAt,
+      };
+}
+
+class SharedViewportCacheSnapshot {
+  const SharedViewportCacheSnapshot({
+    required this.worldId,
+    required this.savedAtIso,
+    required this.generatedAt,
+    required this.cells,
+    required this.landmarks,
+  });
+
+  final String worldId;
+  final String savedAtIso;
+  final String generatedAt;
+  final List<SharedCell> cells;
+  final List<SharedLandmark> landmarks;
+
+  factory SharedViewportCacheSnapshot.empty({String worldId = 'global'}) {
+    return SharedViewportCacheSnapshot(
+      worldId: worldId,
+      savedAtIso: '',
+      generatedAt: '',
+      cells: const <SharedCell>[],
+      landmarks: const <SharedLandmark>[],
+    );
+  }
+
+  factory SharedViewportCacheSnapshot.fromJson(Map<String, dynamic> json) {
+    return SharedViewportCacheSnapshot(
+      worldId: json['worldId'] as String? ?? 'global',
+      savedAtIso: json['savedAtIso'] as String? ?? '',
+      generatedAt: json['generatedAt'] as String? ?? '',
+      cells: ((json['cells'] as List?) ?? const [])
+          .map((e) => SharedCell.fromJson(Map<String, dynamic>.from(e as Map)))
+          .toList(growable: false),
+      landmarks: ((json['landmarks'] as List?) ?? const [])
+          .map(
+            (e) => SharedLandmark.fromJson(Map<String, dynamic>.from(e as Map)),
+          )
+          .toList(growable: false),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'worldId': worldId,
+        'savedAtIso': savedAtIso,
+        'generatedAt': generatedAt,
+        'cells': cells.map((cell) => cell.toJson()).toList(growable: false),
+        'landmarks': landmarks
+            .map((landmark) => landmark.toJson())
+            .toList(growable: false),
+      };
 }

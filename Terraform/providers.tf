@@ -18,8 +18,10 @@ locals {
   player_presence_table_name  = "${local.name_prefix}-player-presence"
   landmarks_table_name        = "${local.name_prefix}-landmarks"
 
-  pending_bucket_name  = "${local.name_prefix}-${data.aws_caller_identity.current.account_id}-${var.aws_region}-pending"
-  approved_bucket_name = "${local.name_prefix}-${data.aws_caller_identity.current.account_id}-${var.aws_region}-approved"
+  pending_bucket_name         = "${local.name_prefix}-${data.aws_caller_identity.current.account_id}-${var.aws_region}-pending"
+  approved_bucket_name        = "${local.name_prefix}-${data.aws_caller_identity.current.account_id}-${var.aws_region}-approved"
+  discovery_cache_bucket_name = "${local.name_prefix}-${data.aws_caller_identity.current.account_id}-${var.aws_region}-discovery-cache"
+  shared_tile_cache_prefix    = "shared-tiles/v1"
 
   allowed_upload_content_types_csv = join(",", var.allowed_upload_content_types)
 }

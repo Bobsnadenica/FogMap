@@ -35,12 +35,67 @@ variable "max_landmark_uploads_per_day" {
 
 variable "presence_ttl_seconds" {
   type    = number
-  default = 300
+  default = 60
+
+  validation {
+    condition     = var.presence_ttl_seconds >= 15
+    error_message = "presence_ttl_seconds must be at least 15 seconds."
+  }
+}
+
+variable "shared_tile_cache_ttl_seconds" {
+  type    = number
+  default = 2592000
+
+  validation {
+    condition     = var.shared_tile_cache_ttl_seconds >= 60
+    error_message = "shared_tile_cache_ttl_seconds must be at least 60 seconds."
+  }
+}
+
+variable "user_bootstrap_cache_ttl_seconds" {
+  type    = number
+  default = 2592000
+
+  validation {
+    condition     = var.user_bootstrap_cache_ttl_seconds >= 300
+    error_message = "user_bootstrap_cache_ttl_seconds must be at least 300 seconds."
+  }
 }
 
 variable "presigned_upload_expiration_seconds" {
   type    = number
   default = 600
+}
+
+variable "pending_landmark_retention_days" {
+  type    = number
+  default = 30
+
+  validation {
+    condition     = var.pending_landmark_retention_days >= 1
+    error_message = "pending_landmark_retention_days must be at least 1 day."
+  }
+}
+
+variable "approved_landmark_noncurrent_retention_days" {
+  type    = number
+  default = 30
+
+  validation {
+    condition     = var.approved_landmark_noncurrent_retention_days >= 1
+    error_message = "approved_landmark_noncurrent_retention_days must be at least 1 day."
+  }
+}
+
+variable "discovery_cache_retention_days" {
+  type    = number
+  default = 30
+
+  validation {
+    condition     = var.discovery_cache_retention_days >= 1
+    error_message = "discovery_cache_retention_days must be at least 1 day."
+  }
 }
 
 variable "cognito_admin_group_name" {

@@ -65,7 +65,8 @@ class DiscoveryMath {
 
     final cells = <CloudDiscoveryCell>{};
     final containingCellId = cellIdFromLatLng(point, cellDegrees);
-    final containingCellCenter = cellCenterFromId(containingCellId, cellDegrees);
+    final containingCellCenter =
+        cellCenterFromId(containingCellId, cellDegrees);
 
     // Always reveal the cell the player is physically inside, even when a
     // small discovery radius would miss that cell's center point.
@@ -96,6 +97,19 @@ class DiscoveryMath {
     return cells;
   }
 
+  static CloudDiscoveryCell cellForPointData({
+    required LatLng point,
+    required double cellDegrees,
+  }) {
+    final cellId = cellIdFromLatLng(point, cellDegrees);
+    final center = cellCenterFromId(cellId, cellDegrees);
+    return CloudDiscoveryCell(
+      cellId: cellId,
+      latitude: center.latitude,
+      longitude: center.longitude,
+    );
+  }
+
   static Set<CloudDiscoveryCell> cellsForPathSegmentData({
     required LatLng start,
     required LatLng end,
@@ -103,7 +117,7 @@ class DiscoveryMath {
     required double cellDegrees,
   }) {
     final totalMeters = _distance(start, end);
-    final stepMeters = math.max(1.0, radiusMeters * 0.75);
+    final stepMeters = math.max(1.0, radiusMeters * 0.5);
     final steps = math.max(1, (totalMeters / stepMeters).ceil());
     final cells = <CloudDiscoveryCell>{};
 
@@ -113,10 +127,9 @@ class DiscoveryMath {
         start.latitude + ((end.latitude - start.latitude) * progress),
         start.longitude + ((end.longitude - start.longitude) * progress),
       );
-      cells.addAll(
-        cellsForRevealData(
+      cells.add(
+        cellForPointData(
           point: point,
-          radiusMeters: radiusMeters,
           cellDegrees: cellDegrees,
         ),
       );
@@ -145,6 +158,29 @@ class DiscoveryMath {
     final maxY = math.max(northWest.y, southEast.y);
 
     return 'z${northWest.z}/x$minX-$maxX/y$minY-$maxY';
+  }
+
+  static List<String> sharedTileIdsForBounds({
+    required double minLat,
+    required double maxLat,
+    required double minLon,
+    required double maxLon,
+    required int mapZoom,
+  }) {
+    final northWest = _slippyTile(maxLat, minLon, mapZoom);
+    final southEast = _slippyTile(minLat, maxLon, mapZoom);
+    final minX = math.min(northWest.x, southEast.x);
+    final maxX = math.max(northWest.x, southEast.x);
+    final minY = math.min(northWest.y, southEast.y);
+    final maxY = math.max(northWest.y, southEast.y);
+
+    final ids = <String>[];
+    for (var x = minX; x <= maxX; x++) {
+      for (var y = minY; y <= maxY; y++) {
+        ids.add('z${northWest.z}/x$x/y$y');
+      }
+    }
+    return ids;
   }
 
   static double coveragePercent({

@@ -2,6 +2,8 @@ import 'dart:io';
 
 import 'package:geolocator/geolocator.dart';
 
+import '../core/constants/app_constants.dart';
+
 class LocationService {
   Future<void> ensureReady({bool requireBackground = true}) async {
     final enabled = await Geolocator.isLocationServiceEnabled();
@@ -59,13 +61,14 @@ class LocationService {
   LocationSettings _platformSettings() {
     if (Platform.isAndroid) {
       return AndroidSettings(
-        accuracy: LocationAccuracy.high,
-        distanceFilter: 8,
-        intervalDuration: const Duration(seconds: 8),
-        foregroundNotificationConfig: const ForegroundNotificationConfig(
-          notificationTitle: 'World Of Fog is tracking location',
-          notificationText:
-              'Background exploration is active while you move.',
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: AppConstants.locationStreamDistanceFilterMeters,
+        intervalDuration: const Duration(
+          seconds: AppConstants.locationStreamIntervalSeconds,
+        ),
+        foregroundNotificationConfig: ForegroundNotificationConfig(
+          notificationTitle: '${AppConstants.appName} is tracking location',
+          notificationText: 'Background exploration is active while you move.',
           enableWakeLock: true,
         ),
       );
@@ -73,8 +76,8 @@ class LocationService {
 
     if (Platform.isIOS) {
       return AppleSettings(
-        accuracy: LocationAccuracy.best,
-        distanceFilter: 8,
+        accuracy: LocationAccuracy.bestForNavigation,
+        distanceFilter: AppConstants.locationStreamDistanceFilterMeters,
         activityType: ActivityType.fitness,
         pauseLocationUpdatesAutomatically: false,
         allowBackgroundLocationUpdates: true,
@@ -83,8 +86,8 @@ class LocationService {
     }
 
     return const LocationSettings(
-      accuracy: LocationAccuracy.high,
-      distanceFilter: 8,
+      accuracy: LocationAccuracy.best,
+      distanceFilter: AppConstants.locationStreamDistanceFilterMeters,
     );
   }
 

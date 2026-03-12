@@ -41,6 +41,10 @@ def get_display_name(event):
     claims = get_claims(event)
     return claims.get("custom:display_name") or claims.get("name") or claims.get("email") or claims.get("cognito:username") or "Explorer"
 
+def get_profile_icon(event):
+    claims = get_claims(event)
+    return claims.get("custom:profile_icon") or "🛡️"
+
 def encode_next_token(payload):
     if not payload: return None
     return base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8")).decode("utf-8")

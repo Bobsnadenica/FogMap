@@ -5,7 +5,9 @@ landmarks_table = dynamodb.Table(LANDMARKS_TABLE)
 
 def handler(event, context):
     require_admin(event)
-    args = event.get("arguments") or {}; limit = int(args.get("limit") or 25); next_token = decode_next_token(args.get("nextToken"))
+    args = event.get("arguments") or {}
+    limit = max(1, min(int(args.get("limit") or 25), 100))
+    next_token = decode_next_token(args.get("nextToken"))
     query_args = {"IndexName":"gsi2","KeyConditionExpression":Key("gsi2pk").eq("STATUS#PENDING_REVIEW"),"Limit":limit}
     if next_token: query_args["ExclusiveStartKey"] = next_token
     resp = landmarks_table.query(**query_args)

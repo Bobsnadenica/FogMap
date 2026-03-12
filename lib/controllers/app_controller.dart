@@ -6,12 +6,15 @@ import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../cloud/auth/cognito_auth_service.dart';
+import '../cloud/backend_config.dart';
 import '../cloud/map_mode.dart';
 import '../cloud/models/landmark_models.dart';
 import '../cloud/models/shared_viewport_models.dart';
 import '../cloud/services/appsync_service.dart';
 import '../cloud/services/landmark_upload_service.dart';
+import '../cloud/services/shared_tile_service.dart';
 import '../core/constants/app_constants.dart';
+import '../core/constants/profile_icon_catalog.dart';
 import '../core/utils/discovery_math.dart';
 import '../data/models/achievement.dart';
 import '../data/models/cloud_discovery_cell.dart';
@@ -20,23 +23,28 @@ import '../data/models/reveal_point.dart';
 import '../services/local_profile_store.dart';
 import '../services/location_service.dart';
 import '../services/share_service.dart';
+import '../services/shared_map_cache_store.dart';
 
 class AppController extends ChangeNotifier {
   AppController({
     required this.localProfileStore,
     required this.locationService,
     required this.shareService,
+    required this.sharedMapCacheStore,
     required this.authService,
     required this.appsyncService,
     required this.landmarkUploadService,
+    required this.sharedTileService,
   });
 
   final LocalProfileStore localProfileStore;
   final LocationService locationService;
   final ShareService shareService;
+  final SharedMapCacheStore sharedMapCacheStore;
   final CognitoAuthService authService;
   final AppSyncService appsyncService;
   final LandmarkUploadService landmarkUploadService;
+  final SharedTileService sharedTileService;
 
   final MapController mapController = MapController();
   final Distance _distance = const Distance();
@@ -45,6 +53,7 @@ class AppController extends ChangeNotifier {
   late PlayerProfile _profile;
   StreamSubscription<Position>? _positionSub;
   Timer? _cloudSyncTimer;
+  Timer? _sharedCachePersistTimer;
   Timer? _sharedViewportDebounceTimer;
   Timer? _sharedViewportPollTimer;
   DateTime? _lastAcceptedFixAt;
@@ -54,11 +63,15 @@ class AppController extends ChangeNotifier {
 
   final Map<String, CloudDiscoveryCell> _pendingCloudCells = {};
   final Map<String, _SharedViewportCacheEntry> _sharedViewportCache = {};
+  final Map<String, SharedCell> _sharedCellStore = {};
+  final Map<String, SharedLandmark> _sharedLandmarkStore = {};
+  String _sharedStoreGeneratedAt = '';
 
   bool _initialized = false;
   bool _tracking = false;
   bool _busy = false;
   bool _sharedLoading = false;
+  bool _cloudSyncInFlight = false;
   String? _error;
   LatLng? _currentLatLng;
   LatLng? _savedMapCenterLatLng;
@@ -91,6 +104,8 @@ class AppController extends ChangeNotifier {
       authService.currentSession?.isAdminOrModerator ?? false;
   bool get canChangeDisplayName =>
       !isSignedIn || !authService.isDisplayNameLocked;
+  bool get canChangeProfileIcon =>
+      !isSignedIn || !authService.isProfileIconLocked;
   String? get signedInEmail => authService.currentSession?.email;
 
   List<RevealPoint> get reveals => _profile.reveals;
@@ -98,11 +113,23 @@ class AppController extends ChangeNotifier {
       _profile.reveals.map((e) => LatLng(e.latitude, e.longitude)).toList();
   List<Achievement> get achievements => AchievementCatalog.build(_profile);
   double get totalKm => _profile.totalDistanceMeters / 1000.0;
+  int get estimatedSteps =>
+      (_profile.totalDistanceMeters / AppConstants.averageStepLengthMeters)
+          .round();
+  int get revealCount => _profile.reveals.length;
   int get discoveredCellsCount => _profile.discoveredCells.length;
   double get coveragePercent => DiscoveryMath.coveragePercent(
         discoveredCells: discoveredCellsCount,
         cellDegrees: AppConstants.statsCellDegrees,
       );
+  String get adventurerRank {
+    if (discoveredCellsCount >= 1000 || totalKm >= 250) return 'Worldbreaker';
+    if (discoveredCellsCount >= 250 || totalKm >= 100) return 'Roadwarden';
+    if (discoveredCellsCount >= 100 || totalKm >= 50) return 'Cartographer';
+    if (discoveredCellsCount >= 25 || totalKm >= 10) return 'Pathfinder';
+    if (discoveredCellsCount >= 5 || totalKm >= 1) return 'Scout';
+    return 'Initiate';
+  }
 
   List<RevealPoint> get personalFogReveals {
     return _profile.discoveredCells.map((cellId) {
@@ -119,28 +146,29 @@ class AppController extends ChangeNotifier {
   }
 
   List<RevealPoint> get activeFogReveals {
-    final merged = <String, RevealPoint>{
-      for (final reveal in personalFogReveals)
-        DiscoveryMath.cellIdFromLatLng(
-          LatLng(reveal.latitude, reveal.longitude),
-          AppConstants.statsCellDegrees,
-        ): reveal,
-    };
-
-    if (_mapMode == MapMode.shared) {
-      for (final cell in _sharedViewport.cells) {
-        merged.putIfAbsent(
-          cell.cellId,
-          () => RevealPoint(
-            latitude: cell.lat,
-            longitude: cell.lon,
-            discoveredAtIso: cell.lastDiscoveredAt,
-          ),
-        );
-      }
+    if (_mapMode != MapMode.shared) {
+      return _profile.reveals.isNotEmpty
+          ? const <RevealPoint>[]
+          : personalFogReveals;
     }
 
-    return merged.values.toList(growable: false);
+    final merged = <RevealPoint>[
+      if (_profile.reveals.isEmpty) ...personalFogReveals,
+    ];
+
+    merged.addAll(
+      _sharedViewport.cells
+          .where((cell) => !_profile.discoveredCells.contains(cell.cellId))
+          .map(
+            (cell) => RevealPoint(
+              latitude: cell.lat,
+              longitude: cell.lon,
+              discoveredAtIso: cell.lastDiscoveredAt,
+            ),
+          ),
+    );
+
+    return merged;
   }
 
   List<SharedPlayer> get sharedPlayers {
@@ -158,6 +186,7 @@ class AppController extends ChangeNotifier {
     await _loadProfileForCurrentSession();
 
     if (isSignedIn) {
+      await _loadPersistedSharedCache();
       await _restorePersonalMapFromCloud(silent: true);
     }
 
@@ -208,11 +237,13 @@ class AppController extends ChangeNotifier {
     required String email,
     required String password,
     required String displayName,
+    required String profileIcon,
   }) async {
     await authService.signUp(
       email: email,
       password: password,
       displayName: displayName,
+      profileIcon: profileIcon,
     );
   }
 
@@ -228,8 +259,9 @@ class AppController extends ChangeNotifier {
     required String password,
   }) async {
     await authService.signIn(email: email, password: password);
-    _resetSharedViewportState(clearCache: false);
+    _resetSessionScopedState();
     await _switchToCurrentSessionProfile();
+    await _loadPersistedSharedCache();
     await _restorePersonalMapFromCloud(silent: false);
     await _bootstrapCurrentLocation();
     _scheduleCloudSync();
@@ -239,12 +271,8 @@ class AppController extends ChangeNotifier {
 
   Future<void> signOut() async {
     await authService.signOut();
-    _pendingCloudCells.clear();
-    _cloudSyncTimer?.cancel();
-    _sharedViewportDebounceTimer?.cancel();
+    _resetSessionScopedState();
     _mapMode = MapMode.personal;
-    _resetSharedViewportState();
-    _pendingLandmarks = const [];
     await _switchToCurrentSessionProfile();
     await _bootstrapCurrentLocation();
     notifyListeners();
@@ -280,6 +308,36 @@ class AppController extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<void> setProfileIcon(String icon) async {
+    final normalized = icon.trim();
+    if (!ProfileIconCatalog.isAllowed(normalized)) return;
+    if (normalized == _profile.profileIcon) return;
+
+    if (isSignedIn) {
+      final updatedProfileIcon = await authService.updateProfileIconOnce(
+        normalized,
+      );
+
+      _profile = _profile.copyWith(
+        profileIcon: updatedProfileIcon,
+        updatedAtIso: DateTime.now().toUtc().toIso8601String(),
+      );
+
+      await localProfileStore.save(_profile, profileKey: _activeProfileKey);
+      _scheduleCloudSync();
+      notifyListeners();
+      return;
+    }
+
+    _profile = _profile.copyWith(
+      profileIcon: normalized,
+      updatedAtIso: DateTime.now().toUtc().toIso8601String(),
+    );
+
+    await localProfileStore.save(_profile, profileKey: _activeProfileKey);
+    notifyListeners();
+  }
+
   Future<void> share() async {
     await shareService.shareProfile(_profile);
   }
@@ -302,6 +360,9 @@ class AppController extends ChangeNotifier {
       _sharedLoading = false;
     } else {
       _ensureSharedViewportPolling();
+      if (camera != null) {
+        _applyStoredSharedViewportFor(camera);
+      }
     }
     notifyListeners();
 
@@ -319,6 +380,7 @@ class AppController extends ChangeNotifier {
     _ensureSharedViewportPolling();
     final cacheKey = _sharedViewportCacheKeyFor(camera);
     final cachedEntry = _sharedViewportCache[cacheKey];
+    final storedViewport = _storedSharedViewportFor(camera);
     final now = DateTime.now().toUtc();
     final hasFreshCache = cachedEntry != null &&
         now.difference(cachedEntry.fetchedAt).inSeconds <
@@ -328,9 +390,14 @@ class AppController extends ChangeNotifier {
           cacheKey: cacheKey,
           viewport: cachedEntry.viewport,
         );
+    final hasAppliedStoredViewport = storedViewport != null &&
+        _applySharedViewportSnapshot(
+          cacheKey: cacheKey,
+          viewport: storedViewport,
+        );
 
     if (!force && hasFreshCache) {
-      if (hasAppliedCache) {
+      if (hasAppliedCache || hasAppliedStoredViewport) {
         notifyListeners();
       }
       return;
@@ -338,18 +405,20 @@ class AppController extends ChangeNotifier {
 
     if (_sharedViewportRequestInFlight) {
       _queuedSharedViewportCamera = camera;
-      if (hasAppliedCache) {
+      if (hasAppliedCache || hasAppliedStoredViewport) {
         notifyListeners();
       }
       return;
     }
 
     final shouldShowLoading = cachedEntry == null &&
-        (_activeSharedViewportCacheKey != cacheKey || _sharedViewport.cells.isEmpty);
+        storedViewport == null &&
+        (_activeSharedViewportCacheKey != cacheKey ||
+            _sharedViewport.cells.isEmpty);
     if (shouldShowLoading) {
       _sharedLoading = true;
       notifyListeners();
-    } else if (hasAppliedCache) {
+    } else if (hasAppliedCache || hasAppliedStoredViewport) {
       notifyListeners();
     }
 
@@ -357,13 +426,20 @@ class AppController extends ChangeNotifier {
 
     try {
       final bounds = camera.visibleBounds;
-      final viewport = await appsyncService.getSharedViewport(
-        minLat: bounds.southEast.latitude,
-        maxLat: bounds.northWest.latitude,
-        minLon: bounds.northWest.longitude,
-        maxLon: bounds.southEast.longitude,
-        zoom: camera.zoom.round(),
+      final minLat = bounds.southEast.latitude;
+      final maxLat = bounds.northWest.latitude;
+      final minLon = bounds.northWest.longitude;
+      final maxLon = bounds.southEast.longitude;
+      final zoom = camera.zoom.round();
+
+      final viewport = await _fetchSharedViewport(
+        minLat: minLat,
+        maxLat: maxLat,
+        minLon: minLon,
+        maxLon: maxLon,
+        zoom: zoom,
       );
+      _mergeSharedViewportStore(viewport);
       _cacheSharedViewport(
         cacheKey: cacheKey,
         viewport: viewport,
@@ -383,18 +459,21 @@ class AppController extends ChangeNotifier {
 
       final queuedCamera = _queuedSharedViewportCamera;
       _queuedSharedViewportCamera = null;
-      if (queuedCamera != null &&
-          isSignedIn &&
-          _mapMode == MapMode.shared) {
+      if (queuedCamera != null && isSignedIn && _mapMode == MapMode.shared) {
         Future<void>(() => refreshSharedViewport(queuedCamera));
       }
     }
   }
 
   void scheduleSharedViewportRefresh(MapCamera camera) {
+    final appliedStoredViewport = _applyStoredSharedViewportFor(camera);
+    if (appliedStoredViewport) {
+      notifyListeners();
+    }
     _sharedViewportDebounceTimer?.cancel();
     _sharedViewportDebounceTimer = Timer(
-      const Duration(milliseconds: AppConstants.sharedViewportDebounceMilliseconds),
+      const Duration(
+          milliseconds: AppConstants.sharedViewportDebounceMilliseconds),
       () => refreshSharedViewport(camera),
     );
   }
@@ -452,39 +531,33 @@ class AppController extends ChangeNotifier {
   }
 
   Future<void> _restorePersonalMapFromCloud({required bool silent}) async {
+    if (_canUseWarmPersonalBootstrapCache(silent: silent)) {
+      return;
+    }
+
     try {
       final remoteCells = await appsyncService.getMyDiscoveryBootstrap();
       final remoteCellIds = remoteCells.map((cell) => cell.cellId).toSet();
       await _backfillLocalDiscoveriesToCloud(remoteCellIds);
 
-      if (remoteCells.isEmpty) return;
+      final bootstrapTimestamp = DateTime.now().toUtc().toIso8601String();
+
+      if (remoteCells.isEmpty) {
+        _profile =
+            _profile.copyWith(lastCloudBootstrapAtIso: bootstrapTimestamp);
+        await localProfileStore.save(_profile, profileKey: _activeProfileKey);
+        return;
+      }
 
       final mergedCells = Set<String>.from(_profile.discoveredCells);
-      final mergedReveals = List<RevealPoint>.from(_profile.reveals);
-      final revealKeys = mergedReveals
-          .map((e) =>
-              '${e.latitude.toStringAsFixed(6)}:${e.longitude.toStringAsFixed(6)}')
-          .toSet();
 
       for (final cell in remoteCells) {
         mergedCells.add(cell.cellId);
-        final key =
-            '${cell.latitude.toStringAsFixed(6)}:${cell.longitude.toStringAsFixed(6)}';
-        if (!revealKeys.contains(key)) {
-          mergedReveals.add(
-            RevealPoint(
-              latitude: cell.latitude,
-              longitude: cell.longitude,
-              discoveredAtIso: DateTime.now().toUtc().toIso8601String(),
-            ),
-          );
-          revealKeys.add(key);
-        }
       }
 
       _profile = _profile.copyWith(
-        reveals: mergedReveals,
         discoveredCells: mergedCells,
+        lastCloudBootstrapAtIso: bootstrapTimestamp,
         updatedAtIso: DateTime.now().toUtc().toIso8601String(),
       );
 
@@ -493,6 +566,20 @@ class AppController extends ChangeNotifier {
       if (!silent) rethrow;
       // If backend bootstrap is not deployed yet, do not block app startup.
     }
+  }
+
+  bool _canUseWarmPersonalBootstrapCache({required bool silent}) {
+    if (!silent) return false;
+    if (_profile.discoveredCells.isEmpty) return false;
+
+    final rawTimestamp = _profile.lastCloudBootstrapAtIso;
+    if (rawTimestamp == null || rawTimestamp.isEmpty) return false;
+
+    final timestamp = DateTime.tryParse(rawTimestamp)?.toUtc();
+    if (timestamp == null) return false;
+
+    return DateTime.now().toUtc().difference(timestamp).inHours <
+        AppConstants.personalBootstrapRefreshHours;
   }
 
   Future<void> _backfillLocalDiscoveriesToCloud(
@@ -528,6 +615,7 @@ class AppController extends ChangeNotifier {
         currentLon: null,
         mapZoom: 17,
         displayName: _syncDisplayName,
+        profileIcon: _syncProfileIcon,
       );
 
       for (final cellId in batchIds) {
@@ -538,9 +626,8 @@ class AppController extends ChangeNotifier {
 
   Future<void> _handlePosition(Position position) async {
     final preview = _previewLocationFor(position);
-    final previewUpdated = preview != null
-        ? _updateCurrentLocationPreview(preview.latLng)
-        : false;
+    final previewUpdated =
+        preview != null ? _updateCurrentLocationPreview(preview.latLng) : false;
 
     final accepted = _acceptedLocationFor(position);
     if (accepted == null) {
@@ -551,8 +638,18 @@ class AppController extends ChangeNotifier {
       return;
     }
 
-    final point = accepted.latLng;
     final previousAccepted = _lastDiscoveryLatLng;
+    final point = _smoothedDiscoveryPoint(accepted);
+    if (previousAccepted != null &&
+        _distance(previousAccepted, point) <
+            AppConstants.stationaryJitterMeters) {
+      if (previewUpdated) {
+        _scheduleCloudSync();
+        notifyListeners();
+      }
+      return;
+    }
+
     _currentLatLng = point;
     _lastDiscoveryLatLng = point;
 
@@ -571,6 +668,27 @@ class AppController extends ChangeNotifier {
 
     final updatedReveals = List<RevealPoint>.from(_profile.reveals);
     final updatedCells = Set<String>.from(_profile.discoveredCells);
+    final revealTime = DateTime.now().toUtc().toIso8601String();
+
+    final lastRevealPoint = updatedReveals.isEmpty
+        ? null
+        : LatLng(
+            updatedReveals.last.latitude,
+            updatedReveals.last.longitude,
+          );
+    final shouldAppendRevealPoint = lastRevealPoint == null ||
+        _distance(lastRevealPoint, point) >=
+            AppConstants.revealPathPointSpacingMeters;
+
+    if (shouldAppendRevealPoint) {
+      updatedReveals.add(
+        RevealPoint(
+          latitude: point.latitude,
+          longitude: point.longitude,
+          discoveredAtIso: revealTime,
+        ),
+      );
+    }
 
     final cloudCells = previousAccepted == null
         ? DiscoveryMath.cellsForRevealData(
@@ -590,16 +708,6 @@ class AppController extends ChangeNotifier {
         .toList();
 
     if (newCloudCells.isNotEmpty) {
-      final revealTime = DateTime.now().toUtc().toIso8601String();
-
-      updatedReveals.add(
-        RevealPoint(
-          latitude: point.latitude,
-          longitude: point.longitude,
-          discoveredAtIso: revealTime,
-        ),
-      );
-
       updatedCells.addAll(newCloudCells.map((e) => e.cellId));
       for (final cell in newCloudCells) {
         _pendingCloudCells[cell.cellId] = cell;
@@ -773,10 +881,15 @@ class AppController extends ChangeNotifier {
   DateTime _positionTimestamp(Position position) => position.timestamp.toUtc();
 
   void _scheduleCloudSync() {
-    if (!isSignedIn || _currentLatLng == null) return;
+    if (!isSignedIn || _currentLatLng == null || !_tracking) return;
 
-    _cloudSyncTimer?.cancel();
+    if (_cloudSyncTimer?.isActive == true || _cloudSyncInFlight) {
+      return;
+    }
+
     _cloudSyncTimer = Timer(const Duration(seconds: 6), () async {
+      _cloudSyncTimer = null;
+      _cloudSyncInFlight = true;
       final pendingSnapshot = Map<String, CloudDiscoveryCell>.from(
         _pendingCloudCells,
       );
@@ -789,6 +902,7 @@ class AppController extends ChangeNotifier {
           currentLon: _currentLatLng?.longitude,
           mapZoom: 17,
           displayName: _syncDisplayName,
+          profileIcon: _syncProfileIcon,
         );
 
         // Keep discoveries queued until sync succeeds to avoid silent data loss.
@@ -798,6 +912,11 @@ class AppController extends ChangeNotifier {
       } catch (e) {
         _error = e.toString();
         notifyListeners();
+      } finally {
+        _cloudSyncInFlight = false;
+        if (isSignedIn && _currentLatLng != null && _tracking) {
+          _scheduleCloudSync();
+        }
       }
     });
   }
@@ -806,16 +925,90 @@ class AppController extends ChangeNotifier {
   void dispose() {
     _positionSub?.cancel();
     _cloudSyncTimer?.cancel();
+    _sharedCachePersistTimer?.cancel();
     _sharedViewportDebounceTimer?.cancel();
     _sharedViewportPollTimer?.cancel();
     appsyncService.dispose();
+    sharedTileService.dispose();
     super.dispose();
+  }
+
+  Future<SharedViewportResponse> _fetchSharedViewport({
+    required double minLat,
+    required double maxLat,
+    required double minLon,
+    required double maxLon,
+    required int zoom,
+  }) async {
+    if (!sharedTileService.isConfigured) {
+      return appsyncService.getSharedViewport(
+        minLat: minLat,
+        maxLat: maxLat,
+        minLon: minLon,
+        maxLon: maxLon,
+        zoom: zoom,
+      );
+    }
+
+    try {
+      final results = await Future.wait([
+        sharedTileService.getViewport(
+          worldId: BackendConfig.defaultWorldId,
+          minLat: minLat,
+          maxLat: maxLat,
+          minLon: minLon,
+          maxLon: maxLon,
+          zoom: zoom,
+        ),
+        appsyncService.getSharedPresence(
+          minLat: minLat,
+          maxLat: maxLat,
+          minLon: minLon,
+          maxLon: maxLon,
+          zoom: zoom,
+        ),
+      ]);
+
+      final tileViewport = results[0] as SharedViewportResponse;
+      final players = results[1] as List<SharedPlayer>;
+
+      if (!tileViewport.hasTilePayload) {
+        return appsyncService.getSharedViewport(
+          minLat: minLat,
+          maxLat: maxLat,
+          minLon: minLon,
+          maxLon: maxLon,
+          zoom: zoom,
+        );
+      }
+
+      return SharedViewportResponse(
+        worldId: tileViewport.worldId,
+        cells: tileViewport.cells,
+        players: players,
+        landmarks: tileViewport.landmarks,
+        generatedAt: tileViewport.generatedAt,
+      );
+    } catch (_) {
+      return appsyncService.getSharedViewport(
+        minLat: minLat,
+        maxLat: maxLat,
+        minLon: minLon,
+        maxLon: maxLon,
+        zoom: zoom,
+      );
+    }
   }
 
   String get _syncDisplayName =>
       authService.currentDisplayName?.trim().isNotEmpty == true
           ? authService.currentDisplayName!.trim()
           : _profile.displayName;
+
+  String get _syncProfileIcon {
+    if (!isSignedIn) return _profile.profileIcon;
+    return authService.currentProfileIcon;
+  }
 
   Future<void> _loadProfileForCurrentSession() async {
     final userId = authService.currentUserId;
@@ -870,6 +1063,15 @@ class AppController extends ChangeNotifier {
       changed = true;
     }
 
+    final authProfileIcon = authService.currentProfileIcon.trim();
+    if (authProfileIcon.isNotEmpty &&
+        ProfileIconCatalog.isAllowed(authProfileIcon) &&
+        (updatedProfile.profileIcon.trim().isEmpty ||
+            updatedProfile.profileIcon == ProfileIconCatalog.defaultIcon)) {
+      updatedProfile = updatedProfile.copyWith(profileIcon: authProfileIcon);
+      changed = true;
+    }
+
     if (!changed) return;
 
     _profile = updatedProfile.copyWith(
@@ -891,6 +1093,15 @@ class AppController extends ChangeNotifier {
     _lastAcceptedFixAt = null;
     _lastAcceptedAccuracyMeters = null;
     _initialFixSamples.clear();
+  }
+
+  void _resetSessionScopedState() {
+    _pendingCloudCells.clear();
+    _cloudSyncTimer?.cancel();
+    _cloudSyncTimer = null;
+    _error = null;
+    _pendingLandmarks = const [];
+    _resetSharedViewportState();
   }
 
   Future<void> _bootstrapCurrentLocation() async {
@@ -956,7 +1167,8 @@ class AppController extends ChangeNotifier {
       fetchedAt: fetchedAt,
     );
 
-    if (_sharedViewportCache.length <= AppConstants.sharedViewportCacheMaxEntries) {
+    if (_sharedViewportCache.length <=
+        AppConstants.sharedViewportCacheMaxEntries) {
       return;
     }
 
@@ -968,7 +1180,109 @@ class AppController extends ChangeNotifier {
     _sharedViewportCache.remove(oldestKey);
   }
 
+  bool _applyStoredSharedViewportFor(MapCamera camera) {
+    final cacheKey = _sharedViewportCacheKeyFor(camera);
+    final storedViewport = _storedSharedViewportFor(camera);
+    if (storedViewport == null) {
+      return false;
+    }
+    return _applySharedViewportSnapshot(
+      cacheKey: cacheKey,
+      viewport: storedViewport,
+    );
+  }
+
+  void _mergeSharedViewportStore(SharedViewportResponse viewport) {
+    var changed = false;
+
+    for (final cell in viewport.cells) {
+      final existing = _sharedCellStore[cell.cellId];
+      if (existing == null ||
+          cell.lastDiscoveredAt.compareTo(existing.lastDiscoveredAt) >= 0) {
+        if (existing != cell) {
+          _sharedCellStore[cell.cellId] = cell;
+          changed = true;
+        }
+      }
+    }
+    for (final landmark in viewport.landmarks) {
+      final existing = _sharedLandmarkStore[landmark.landmarkId];
+      final existingCreatedAt = existing?.createdAt ?? '';
+      final incomingCreatedAt = landmark.createdAt ?? '';
+      if (existing == null ||
+          incomingCreatedAt.compareTo(existingCreatedAt) >= 0) {
+        if (existing != landmark) {
+          _sharedLandmarkStore[landmark.landmarkId] = landmark;
+          changed = true;
+        }
+      }
+    }
+
+    if (viewport.generatedAt.isNotEmpty &&
+        viewport.generatedAt.compareTo(_sharedStoreGeneratedAt) >= 0) {
+      _sharedStoreGeneratedAt = viewport.generatedAt;
+    }
+
+    if (changed) {
+      _scheduleSharedCachePersist(worldId: viewport.worldId);
+    }
+  }
+
+  SharedViewportResponse? _storedSharedViewportFor(MapCamera camera) {
+    if (_sharedCellStore.isEmpty && _sharedLandmarkStore.isEmpty) {
+      return null;
+    }
+    final cells = _sharedCellStore.values
+        .where(
+          (cell) => _isInViewport(
+            lat: cell.lat,
+            lon: cell.lon,
+            camera: camera,
+          ),
+        )
+        .toList(growable: false)
+      ..sort((a, b) => b.lastDiscoveredAt.compareTo(a.lastDiscoveredAt));
+
+    final landmarks = _sharedLandmarkStore.values
+        .where(
+          (landmark) => _isInViewport(
+            lat: landmark.lat,
+            lon: landmark.lon,
+            camera: camera,
+          ),
+        )
+        .toList(growable: false)
+      ..sort((a, b) => (b.createdAt ?? '').compareTo(a.createdAt ?? ''));
+
+    if (cells.isEmpty && landmarks.isEmpty) {
+      return null;
+    }
+
+    return SharedViewportResponse(
+      worldId: _sharedViewport.worldId.isEmpty
+          ? BackendConfig.defaultWorldId
+          : _sharedViewport.worldId,
+      cells: cells,
+      players: const [],
+      landmarks: landmarks,
+      generatedAt: _sharedStoreGeneratedAt,
+    );
+  }
+
+  bool _isInViewport({
+    required double lat,
+    required double lon,
+    required MapCamera camera,
+  }) {
+    final bounds = camera.visibleBounds;
+    return lat >= bounds.southEast.latitude &&
+        lat <= bounds.northWest.latitude &&
+        lon >= bounds.northWest.longitude &&
+        lon <= bounds.southEast.longitude;
+  }
+
   void _resetSharedViewportState({bool clearCache = true}) {
+    _sharedCachePersistTimer?.cancel();
     _sharedViewportDebounceTimer?.cancel();
     _stopSharedViewportPolling();
     _sharedViewport = SharedViewportResponse.empty();
@@ -976,9 +1290,65 @@ class AppController extends ChangeNotifier {
     _sharedViewportRequestInFlight = false;
     _queuedSharedViewportCamera = null;
     _activeSharedViewportCacheKey = null;
+    _sharedStoreGeneratedAt = '';
     if (clearCache) {
       _sharedViewportCache.clear();
+      _sharedCellStore.clear();
+      _sharedLandmarkStore.clear();
     }
+  }
+
+  Future<void> _loadPersistedSharedCache() async {
+    final snapshot = await sharedMapCacheStore.load(
+      worldId: BackendConfig.defaultWorldId,
+      maxAge: const Duration(
+        hours: AppConstants.sharedViewportPersistedCacheMaxAgeHours,
+      ),
+    );
+    if (snapshot == null) {
+      return;
+    }
+
+    _sharedCellStore
+      ..clear()
+      ..addEntries(
+        snapshot.cells.map(
+          (cell) => MapEntry(cell.cellId, cell),
+        ),
+      );
+    _sharedLandmarkStore
+      ..clear()
+      ..addEntries(
+        snapshot.landmarks.map(
+          (landmark) => MapEntry(landmark.landmarkId, landmark),
+        ),
+      );
+    _sharedStoreGeneratedAt = snapshot.generatedAt;
+  }
+
+  void _scheduleSharedCachePersist({required String worldId}) {
+    _sharedCachePersistTimer?.cancel();
+    _sharedCachePersistTimer = Timer(const Duration(seconds: 2), () async {
+      final sortedCells = _sharedCellStore.values.toList(growable: false)
+        ..sort((a, b) => b.lastDiscoveredAt.compareTo(a.lastDiscoveredAt));
+      final sortedLandmarks = _sharedLandmarkStore.values
+          .toList(growable: false)
+        ..sort((a, b) => (b.createdAt ?? '').compareTo(a.createdAt ?? ''));
+
+      final snapshot = SharedViewportCacheSnapshot(
+        worldId: worldId,
+        savedAtIso: DateTime.now().toUtc().toIso8601String(),
+        generatedAt: _sharedStoreGeneratedAt,
+        cells: sortedCells
+            .take(AppConstants.sharedViewportPersistedCellLimit)
+            .toList(growable: false),
+        landmarks: sortedLandmarks
+            .take(AppConstants.sharedViewportPersistedLandmarkLimit)
+            .toList(growable: false),
+      );
+
+      await sharedMapCacheStore.save(snapshot);
+    });
   }
 
   void _ensureSharedViewportPolling() {
@@ -1013,6 +1383,30 @@ class AppController extends ChangeNotifier {
       lonTotal += sample.latLng.longitude;
     }
     return LatLng(latTotal / samples.length, lonTotal / samples.length);
+  }
+
+  LatLng _smoothedDiscoveryPoint(_AcceptedLocation candidate) {
+    final previous = _lastDiscoveryLatLng;
+    if (previous == null) return candidate.latLng;
+
+    final distanceMeters = _distance(previous, candidate.latLng);
+    if (distanceMeters <= AppConstants.stationaryJitterMeters) {
+      return previous;
+    }
+
+    final blend = (distanceMeters / (distanceMeters + candidate.accuracy))
+        .clamp(
+          AppConstants.discoverySmoothingMinBlend,
+          AppConstants.discoverySmoothingMaxBlend,
+        )
+        .toDouble();
+
+    return LatLng(
+      previous.latitude +
+          ((candidate.latLng.latitude - previous.latitude) * blend),
+      previous.longitude +
+          ((candidate.latLng.longitude - previous.longitude) * blend),
+    );
   }
 
   bool _updateCurrentLocationPreview(LatLng point) {

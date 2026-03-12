@@ -19,15 +19,25 @@ class _AppShellState extends State<AppShell> {
 
   @override
   Widget build(BuildContext context) {
-    final screens = [
-      MapScreen(controller: widget.controller),
-      ProfileScreen(controller: widget.controller),
-      AchievementsScreen(controller: widget.controller),
-    ];
-
     return AnimatedBuilder(
       animation: widget.controller,
       builder: (context, _) {
+        final identityKey = widget.controller.profile.id;
+        final screens = [
+          MapScreen(
+            key: ValueKey('map-$identityKey'),
+            controller: widget.controller,
+          ),
+          ProfileScreen(
+            key: ValueKey('profile-$identityKey'),
+            controller: widget.controller,
+          ),
+          AchievementsScreen(
+            key: ValueKey('achievements-$identityKey'),
+            controller: widget.controller,
+          ),
+        ];
+
         WidgetsBinding.instance.addPostFrameCallback((_) {
           final error = widget.controller.error;
           if (error != null && context.mounted) {
@@ -40,26 +50,41 @@ class _AppShellState extends State<AppShell> {
 
         return Scaffold(
           body: IndexedStack(index: _index, children: screens),
-          bottomNavigationBar: BottomNavigationBar(
-            currentIndex: _index,
-            onTap: (value) => setState(() => _index = value),
-            items: const [
-              BottomNavigationBarItem(
-                icon: Icon(Icons.map_outlined),
-                activeIcon: Icon(Icons.map),
-                label: 'Map',
+          bottomNavigationBar: DecoratedBox(
+            decoration: const BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Color(0xFF13100D),
+                  Color(0xFF0F1318),
+                ],
               ),
-              BottomNavigationBarItem(
-                icon: Icon(Icons.person_outline),
-                activeIcon: Icon(Icons.person),
-                label: 'Profile',
+              border: Border(
+                top: BorderSide(color: Color(0x22D6B36A)),
               ),
-              BottomNavigationBarItem(
-                icon: Icon(Icons.emoji_events_outlined),
-                activeIcon: Icon(Icons.emoji_events),
-                label: 'Achievements',
-              ),
-            ],
+            ),
+            child: NavigationBar(
+              selectedIndex: _index,
+              onDestinationSelected: (value) => setState(() => _index = value),
+              destinations: const [
+                NavigationDestination(
+                  icon: Icon(Icons.map_outlined),
+                  selectedIcon: Icon(Icons.map),
+                  label: 'Map',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.travel_explore_outlined),
+                  selectedIcon: Icon(Icons.travel_explore),
+                  label: 'Atlas',
+                ),
+                NavigationDestination(
+                  icon: Icon(Icons.auto_awesome_outlined),
+                  selectedIcon: Icon(Icons.auto_awesome),
+                  label: 'Deeds',
+                ),
+              ],
+            ),
           ),
         );
       },

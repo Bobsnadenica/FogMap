@@ -43,7 +43,7 @@ class _FogOfWarPainter extends CustomPainter {
     required this.reveals,
     required this.trailPoints,
     required this.revision,
-  }) : _revealSignature = Object.hashAll(
+  })  : _revealSignature = Object.hashAll(
           reveals.map(
             (reveal) => DiscoveryMath.cellIdFromLatLng(
               LatLng(reveal.latitude, reveal.longitude),
@@ -243,8 +243,7 @@ class _FogOfWarPainter extends CustomPainter {
       final radius = Radius.circular(
         math.min(rect.width, rect.height).clamp(0.0, 12.0).toDouble() * 0.45,
       );
-      return ui.Path()
-        ..addRRect(ui.RRect.fromRectAndRadius(rect, radius));
+      return ui.Path()..addRRect(ui.RRect.fromRectAndRadius(rect, radius));
     }
 
     return ui.Path()
@@ -258,15 +257,38 @@ class _FogOfWarPainter extends CustomPainter {
   ui.Path? _trailPath() {
     if (trailPoints.isEmpty) return null;
 
-    final path = ui.Path();
-    for (var index = 0; index < trailPoints.length; index++) {
-      final point = camera.latLngToScreenOffset(trailPoints[index]);
-      if (index == 0) {
-        path.moveTo(point.dx, point.dy);
-      } else {
-        path.lineTo(point.dx, point.dy);
-      }
+    if (trailPoints.length == 1) {
+      final point = camera.latLngToScreenOffset(trailPoints.first);
+      return ui.Path()..moveTo(point.dx, point.dy);
     }
+
+    final offsets =
+        trailPoints.map(camera.latLngToScreenOffset).toList(growable: false);
+    final path = ui.Path();
+    path.moveTo(offsets.first.dx, offsets.first.dy);
+
+    if (offsets.length == 2) {
+      path.lineTo(offsets.last.dx, offsets.last.dy);
+      return path;
+    }
+
+    for (var index = 1; index < offsets.length - 1; index++) {
+      final current = offsets[index];
+      final next = offsets[index + 1];
+      final midPoint = Offset(
+        (current.dx + next.dx) / 2,
+        (current.dy + next.dy) / 2,
+      );
+      path.quadraticBezierTo(
+        current.dx,
+        current.dy,
+        midPoint.dx,
+        midPoint.dy,
+      );
+    }
+
+    final last = offsets.last;
+    path.lineTo(last.dx, last.dy);
 
     return path;
   }
@@ -276,8 +298,8 @@ class _FogOfWarPainter extends CustomPainter {
       camera.center.latitude,
       camera.zoom,
     );
-    final width = (AppConstants.discoveryRadiusMeters * 2.1) / metersPerPixel;
-    return width.clamp(12.0, 34.0).toDouble();
+    final width = (AppConstants.discoveryRadiusMeters * 1.35) / metersPerPixel;
+    return width.clamp(8.0, 18.0).toDouble();
   }
 
   @override
