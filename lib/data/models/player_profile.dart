@@ -11,6 +11,7 @@ class PlayerProfile {
     required this.reveals,
     required this.discoveredCells,
     required this.totalDistanceMeters,
+    required this.hasSeenMapGuide,
     this.lastCloudBootstrapAtIso,
     this.lastLatitude,
     this.lastLongitude,
@@ -24,6 +25,7 @@ class PlayerProfile {
   final List<RevealPoint> reveals;
   final Set<String> discoveredCells;
   final double totalDistanceMeters;
+  final bool hasSeenMapGuide;
   final String? lastCloudBootstrapAtIso;
   final double? lastLatitude;
   final double? lastLongitude;
@@ -37,6 +39,7 @@ class PlayerProfile {
     List<RevealPoint>? reveals,
     Set<String>? discoveredCells,
     double? totalDistanceMeters,
+    bool? hasSeenMapGuide,
     String? lastCloudBootstrapAtIso,
     double? lastLatitude,
     double? lastLongitude,
@@ -50,6 +53,7 @@ class PlayerProfile {
       reveals: reveals ?? this.reveals,
       discoveredCells: discoveredCells ?? this.discoveredCells,
       totalDistanceMeters: totalDistanceMeters ?? this.totalDistanceMeters,
+      hasSeenMapGuide: hasSeenMapGuide ?? this.hasSeenMapGuide,
       lastCloudBootstrapAtIso:
           lastCloudBootstrapAtIso ?? this.lastCloudBootstrapAtIso,
       lastLatitude: lastLatitude ?? this.lastLatitude,
@@ -66,6 +70,7 @@ class PlayerProfile {
         'reveals': reveals.map((e) => e.toJson()).toList(),
         'discoveredCells': discoveredCells.toList()..sort(),
         'totalDistanceMeters': totalDistanceMeters,
+        'hasSeenMapGuide': hasSeenMapGuide,
         'lastCloudBootstrapAtIso': lastCloudBootstrapAtIso,
         'lastLatitude': lastLatitude,
         'lastLongitude': lastLongitude,
@@ -90,6 +95,7 @@ class PlayerProfile {
               .toSet(),
       totalDistanceMeters:
           (json['totalDistanceMeters'] as num?)?.toDouble() ?? 0,
+      hasSeenMapGuide: json['hasSeenMapGuide'] as bool? ?? false,
       lastCloudBootstrapAtIso: json['lastCloudBootstrapAtIso'] as String?,
       lastLatitude: (json['lastLatitude'] as num?)?.toDouble(),
       lastLongitude: (json['lastLongitude'] as num?)?.toDouble(),
@@ -111,6 +117,7 @@ class PlayerProfile {
       reveals: const [],
       discoveredCells: <String>{},
       totalDistanceMeters: 0,
+      hasSeenMapGuide: false,
     );
   }
 }

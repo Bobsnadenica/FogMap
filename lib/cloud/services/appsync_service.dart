@@ -417,8 +417,8 @@ query GetLandmarkViewUrl(\$landmarkId: ID!) {
   Future<List<CloudDiscoveryCell>> getMyDiscoveryBootstrap() async {
     final data = await _post(
       query: '''
-query GetMyDiscoveryBootstrap {
-  getMyDiscoveryBootstrap {
+query GetMyDiscoveryBootstrap(\$worldId: String) {
+  getMyDiscoveryBootstrap(worldId: \$worldId) {
     cells {
       cellId
       lat
@@ -427,7 +427,7 @@ query GetMyDiscoveryBootstrap {
   }
 }
 ''',
-      variables: const {},
+      variables: {'worldId': BackendConfig.defaultWorldId},
     );
 
     final root = _asMap(data['getMyDiscoveryBootstrap']);

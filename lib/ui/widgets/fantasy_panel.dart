@@ -74,12 +74,14 @@ class FantasyProgressBar extends StatelessWidget {
     this.height = 10,
     this.fill = const [Color(0xFFC89B57), Color(0xFFF0D7A2)],
     this.trackColor = const Color(0x55201C14),
+    this.glowColor = const Color(0x44E5C37C),
   });
 
   final double value;
   final double height;
   final List<Color> fill;
   final Color trackColor;
+  final Color glowColor;
 
   @override
   Widget build(BuildContext context) {
@@ -104,9 +106,9 @@ class FantasyProgressBar extends StatelessWidget {
                 decoration: BoxDecoration(
                   gradient: LinearGradient(colors: fill),
                   borderRadius: BorderRadius.circular(height),
-                  boxShadow: const [
+                  boxShadow: [
                     BoxShadow(
-                      color: Color(0x44E5C37C),
+                      color: glowColor,
                       blurRadius: 8,
                     ),
                   ],

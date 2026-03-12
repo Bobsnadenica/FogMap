@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
@@ -8,6 +9,7 @@ import '../../cloud/map_mode.dart';
 import '../../cloud/models/shared_viewport_models.dart';
 import '../../controllers/app_controller.dart';
 import '../../core/constants/app_constants.dart';
+import '../../services/external_maps_service.dart';
 import '../widgets/fantasy_panel.dart';
 import '../widgets/fog_of_war_overlay.dart';
 import '../widgets/map_mode_toggle.dart';
@@ -25,6 +27,10 @@ class _MapScreenState extends State<MapScreen> {
   int _mapRevision = 0;
   bool _mapReady = false;
   bool _autoCenteredOnLiveFix = false;
+  bool _mapGuideQueued = false;
+  DateTime? _lastSharedTapAt;
+  String? _lastSharedTapRegionId;
+  LatLng? _navigationPin;
 
   @override
   Widget build(BuildContext context) {
@@ -35,8 +41,12 @@ class _MapScreenState extends State<MapScreen> {
         final current = controller.currentLatLng;
         final center = controller.mapCenter;
         final fogReveals = controller.activeFogReveals;
+        final sharedRegionOutlines =
+            _mapReady && controller.mapMode == MapMode.shared
+                ? controller
+                    .visibleSharedRegionsFor(controller.mapController.camera)
+                : const <SharedRegionOutline>[];
         final screenWidth = MediaQuery.sizeOf(context).width;
-        final headerWidth = math.min(math.max(screenWidth * 0.58, 232.0), 320.0);
 
         if (_mapReady && current != null && !_autoCenteredOnLiveFix) {
           WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -51,6 +61,17 @@ class _MapScreenState extends State<MapScreen> {
           });
         }
 
+        if (_mapReady &&
+            !_mapGuideQueued &&
+            !controller.hasSeenMapGuide &&
+            controller.initialized) {
+          _mapGuideQueued = true;
+          WidgetsBinding.instance.addPostFrameCallback((_) async {
+            if (!mounted) return;
+            await _showMapGuide(context);
+          });
+        }
+
         return Scaffold(
           backgroundColor: const Color(0xFF0D1113),
           body: Stack(
@@ -58,10 +79,26 @@ class _MapScreenState extends State<MapScreen> {
               Positioned.fill(
                 child: ColorFiltered(
                   colorFilter: const ColorFilter.matrix([
-                    0.90, 0.08, 0.02, 0, 8,
-                    0.12, 0.90, 0.04, 0, 5,
-                    0.05, 0.10, 0.86, 0, 0,
-                    0.00, 0.00, 0.00, 1, 0,
+                    0.90,
+                    0.08,
+                    0.02,
+                    0,
+                    8,
+                    0.12,
+                    0.90,
+                    0.04,
+                    0,
+                    5,
+                    0.05,
+                    0.10,
+                    0.86,
+                    0,
+                    0,
+                    0.00,
+                    0.00,
+                    0.00,
+                    1,
+                    0,
                   ]),
                   child: FlutterMap(
                     mapController: controller.mapController,
@@ -70,6 +107,13 @@ class _MapScreenState extends State<MapScreen> {
                       initialZoom: AppConstants.initialZoom,
                       minZoom: AppConstants.minZoom,
                       maxZoom: AppConstants.maxZoom,
+                      interactionOptions: InteractionOptions(
+                        flags: controller.mapMode == MapMode.shared
+                            ? InteractiveFlag.all &
+                                ~InteractiveFlag.doubleTapZoom &
+                                ~InteractiveFlag.doubleTapDragZoom
+                            : InteractiveFlag.all,
+                      ),
                       onMapReady: () {
                         if (mounted && !_mapReady) {
                           setState(() {
@@ -83,6 +127,8 @@ class _MapScreenState extends State<MapScreen> {
                           }
                         }
                       },
+                      onTap: (_, point) => _handleSharedTap(point),
+                      onLongPress: (_, point) => _handleMapLongPress(point),
                       onPositionChanged: (_, __) {
                         if (mounted && _mapReady) {
                           setState(() => _mapRevision++);
@@ -97,8 +143,7 @@ class _MapScreenState extends State<MapScreen> {
                     children: [
                       TileLayer(
                         urlTemplate: AppConstants.tileUrlTemplate,
-                        userAgentPackageName:
-                            AppConstants.userAgentPackageName,
+                        userAgentPackageName: AppConstants.userAgentPackageName,
                       ),
                       if (controller.revealLatLngs.length > 1)
                         PolylineLayer(
@@ -112,7 +157,10 @@ class _MapScreenState extends State<MapScreen> {
                         ),
                       MarkerLayer(
                         markers: [
-                          if (current != null) _currentMarker(controller, current),
+                          if (current != null)
+                            _currentMarker(controller, current),
+                          if (_navigationPin != null)
+                            _navigationPinMarker(context, _navigationPin!),
                           if (controller.mapMode == MapMode.shared)
                             ...controller.sharedPlayers.map(_playerMarker),
                           if (controller.mapMode == MapMode.shared)
@@ -154,32 +202,59 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                   ),
                 ),
+              if (_mapReady && controller.mapMode == MapMode.shared)
+                Positioned.fill(
+                  child: IgnorePointer(
+                    child: _SharedRegionOutlineOverlay(
+                      camera: controller.mapController.camera,
+                      outlines: sharedRegionOutlines,
+                      revision: _mapRevision,
+                    ),
+                  ),
+                ),
               Positioned.fill(
                 child: SafeArea(
                   minimum: const EdgeInsets.fromLTRB(14, 12, 14, 14),
                   child: Stack(
                     children: [
                       Positioned(
-                        left: 0,
-                        top: 0,
-                        child: SizedBox(
-                          width: headerWidth,
-                          child: _AtlasHeaderCard(controller: controller),
-                        ),
-                      ),
-                      Positioned(
                         top: 0,
                         right: 0,
                         child: Column(
                           children: [
+                            MapModeMenuButton(
+                              mode: controller.mapMode,
+                              sharedEnabled: controller.isSignedIn,
+                              onChanged: (mode) async {
+                                if (mode == MapMode.shared &&
+                                    !controller.isSignedIn) {
+                                  if (!context.mounted) return;
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(
+                                      content: Text(
+                                        'Sign in from Atlas to enter the shared realm.',
+                                      ),
+                                    ),
+                                  );
+                                  return;
+                                }
+                                await controller.setMapMode(
+                                  mode,
+                                  camera: _mapReady
+                                      ? controller.mapController.camera
+                                      : null,
+                                );
+                              },
+                            ),
+                            const SizedBox(height: 10),
                             _MapActionButton(
                               icon: Icons.my_location_rounded,
                               tooltip: 'Center on me',
                               onPressed: (!_mapReady || current == null)
                                   ? null
                                   : () {
-                                      controller.mapController
-                                          .move(center, AppConstants.initialZoom);
+                                      controller.mapController.move(
+                                          center, AppConstants.initialZoom);
                                       setState(() => _mapRevision++);
                                     },
                             ),
@@ -198,7 +273,7 @@ class _MapScreenState extends State<MapScreen> {
                         Positioned(
                           left: 0,
                           right: 72,
-                          bottom: 116,
+                          bottom: 18,
                           child: Align(
                             alignment: Alignment.centerLeft,
                             child: ConstrainedBox(
@@ -208,31 +283,13 @@ class _MapScreenState extends State<MapScreen> {
                               child: _StatusChip(
                                 label: _statusText(controller),
                                 active: controller.tracking,
-                                loading: controller.sharedLoading ||
-                                    controller.busy,
+                                loading:
+                                    controller.sharedLoading || controller.busy,
+                                progress: controller.sharedSyncProgress,
                               ),
                             ),
                           ),
                         ),
-                      Positioned(
-                        left: 0,
-                        right: 0,
-                        bottom: 0,
-                        child: Center(
-                          child: ConstrainedBox(
-                            constraints: const BoxConstraints(maxWidth: 560),
-                            child: _RealmCard(
-                              controller: controller,
-                              onChanged: (mode) => controller.setMapMode(
-                                mode,
-                                camera: _mapReady
-                                    ? controller.mapController.camera
-                                    : null,
-                              ),
-                            ),
-                          ),
-                        ),
-                      ),
                     ],
                   ),
                 ),
@@ -244,9 +301,175 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
+  Future<void> _showMapGuide(BuildContext context) async {
+    final controller = widget.controller;
+    await showModalBottomSheet<void>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isDismissible: true,
+      builder: (sheetContext) {
+        final guideItems = <({IconData icon, String title, String body})>[
+          (
+            icon: Icons.public_outlined,
+            title: 'Realm switch',
+            body:
+                'Use the top-right globe button to switch between your personal atlas and the shared realm.',
+          ),
+          (
+            icon: Icons.my_location_rounded,
+            title: 'Center on you',
+            body:
+                'The location button recenters the map on your live position.',
+          ),
+          if (controller.isSignedIn)
+            (
+              icon: Icons.add_a_photo_outlined,
+              title: 'New landmark',
+              body:
+                  'Add a photo landmark from your current position for moderation and later display on the shared realm.',
+            ),
+          (
+            icon: Icons.assistant_navigation,
+            title: 'Pin and directions',
+            body:
+                'Long-press anywhere on the map to drop a pin and open directions in Apple Maps or Google Maps.',
+          ),
+          if (controller.isSignedIn)
+            (
+              icon: Icons.grid_4x4_outlined,
+              title: 'Shared region sync',
+              body:
+                  'In Shared Realm, double-tap a region border to download that area. Progress appears in the status bar.',
+            ),
+        ];
+
+        return Padding(
+          padding: const EdgeInsets.all(16),
+          child: FantasyPanel(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Map guide',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  'A quick overview of the controls on this screen.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+                const SizedBox(height: 16),
+                ...guideItems.map(
+                  (item) => Padding(
+                    padding: const EdgeInsets.only(bottom: 12),
+                    child: Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Container(
+                          width: 32,
+                          height: 32,
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(11),
+                            color: const Color(0x22F2E8D1),
+                          ),
+                          child: Icon(
+                            item.icon,
+                            size: 18,
+                            color: const Color(0xFFF2E8D1),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                item.title,
+                                style: Theme.of(context)
+                                    .textTheme
+                                    .labelLarge
+                                    ?.copyWith(fontWeight: FontWeight.w800),
+                              ),
+                              const SizedBox(height: 2),
+                              Text(
+                                item.body,
+                                style: Theme.of(context).textTheme.bodySmall,
+                              ),
+                            ],
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 4),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton(
+                    onPressed: () => Navigator.of(sheetContext).pop(),
+                    child: const Text('Continue'),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+
+    await controller.markMapGuideSeen();
+  }
+
+  void _handleSharedTap(LatLng point) {
+    final controller = widget.controller;
+    if (!_mapReady || controller.mapMode != MapMode.shared) {
+      return;
+    }
+
+    final tappedRegionId = controller.sharedRegionIdForPoint(point);
+    final now = DateTime.now();
+    final isDoubleTap = _lastSharedTapRegionId == tappedRegionId &&
+        _lastSharedTapAt != null &&
+        now.difference(_lastSharedTapAt!).inMilliseconds <=
+            AppConstants.sharedRegionDoubleTapWindowMs;
+
+    _lastSharedTapAt = now;
+    _lastSharedTapRegionId = tappedRegionId;
+
+    if (!isDoubleTap) {
+      return;
+    }
+
+    controller
+        .syncSharedRegionAtPoint(
+      point,
+      camera: controller.mapController.camera,
+    )
+        .catchError((Object error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to sync region: $error')),
+      );
+    });
+  }
+
+  void _handleMapLongPress(LatLng point) {
+    setState(() {
+      _navigationPin = point;
+      _mapRevision++;
+    });
+    _showDirectionsSheet(
+      context,
+      title: 'Pinned waypoint',
+      point: point,
+      allowClear: true,
+    );
+  }
+
   String _statusText(AppController controller) {
     if (controller.sharedLoading) {
-      return 'Loading realm map';
+      return controller.sharedSyncLabel ?? 'Loading realm map';
     }
     if (controller.busy) {
       return 'Requesting location';
@@ -354,6 +577,55 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
+  Marker _navigationPinMarker(BuildContext context, LatLng point) {
+    return Marker(
+      point: point,
+      width: 44,
+      height: 56,
+      child: GestureDetector(
+        onTap: () => _showDirectionsSheet(
+          context,
+          title: 'Pinned waypoint',
+          point: point,
+          allowClear: true,
+        ),
+        child: Column(
+          children: [
+            Container(
+              width: 34,
+              height: 34,
+              decoration: BoxDecoration(
+                gradient: const LinearGradient(
+                  colors: [Color(0xFFF0D6A3), Color(0xFFC3813A)],
+                ),
+                shape: BoxShape.circle,
+                border: Border.all(color: const Color(0xFFF8F1E3), width: 2),
+                boxShadow: const [
+                  BoxShadow(
+                    color: Color(0x66101010),
+                    blurRadius: 12,
+                    offset: Offset(0, 5),
+                  ),
+                ],
+              ),
+              child: const Icon(
+                Icons.assistant_navigation,
+                size: 18,
+                color: Color(0xFF17140F),
+              ),
+            ),
+            const SizedBox(height: 2),
+            Container(
+              width: 2,
+              height: 14,
+              color: const Color(0xFFF2E8D1),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Marker _landmarkMarker(BuildContext context, SharedLandmark landmark) {
     return Marker(
       point: LatLng(landmark.lat, landmark.lon),
@@ -366,35 +638,10 @@ class _MapScreenState extends State<MapScreen> {
               landmark.landmarkId,
             );
             if (!context.mounted) return;
-            showModalBottomSheet(
-              context: context,
-              backgroundColor: Colors.transparent,
-              builder: (_) => Padding(
-                padding: const EdgeInsets.all(16),
-                child: FantasyPanel(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        landmark.title,
-                        style: Theme.of(context).textTheme.titleLarge,
-                      ),
-                      const SizedBox(height: 8),
-                      Text(landmark.description),
-                      const SizedBox(height: 12),
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(18),
-                        child: Image.network(
-                          viewUrl,
-                          height: 220,
-                          fit: BoxFit.cover,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
+            _showLandmarkSheet(
+              context,
+              landmark: landmark,
+              viewUrl: viewUrl,
             );
           } catch (e) {
             if (!context.mounted) return;
@@ -421,6 +668,141 @@ class _MapScreenState extends State<MapScreen> {
             Icons.photo_camera_outlined,
             size: 18,
             color: Color(0xFF17140F),
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showLandmarkSheet(
+    BuildContext context, {
+    required SharedLandmark landmark,
+    required String viewUrl,
+  }) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => Padding(
+        padding: const EdgeInsets.all(16),
+        child: FantasyPanel(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                landmark.title,
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              if (landmark.description.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(landmark.description),
+              ],
+              const SizedBox(height: 12),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(18),
+                child: Image.network(
+                  viewUrl,
+                  height: 220,
+                  fit: BoxFit.cover,
+                ),
+              ),
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  onPressed: () async {
+                    final launched = await ExternalMapsService.openDirections(
+                      latitude: landmark.lat,
+                      longitude: landmark.lon,
+                      label: landmark.title,
+                    );
+                    if (!context.mounted) return;
+                    if (!launched) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('No maps application was available.'),
+                        ),
+                      );
+                    }
+                  },
+                  icon: const Icon(Icons.route_outlined),
+                  label: const Text('Get directions'),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  void _showDirectionsSheet(
+    BuildContext context, {
+    required String title,
+    required LatLng point,
+    bool allowClear = false,
+  }) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => Padding(
+        padding: const EdgeInsets.all(16),
+        child: FantasyPanel(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                title,
+                style: Theme.of(context).textTheme.titleLarge,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                '${point.latitude.toStringAsFixed(5)}, ${point.longitude.toStringAsFixed(5)}',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+              const SizedBox(height: 14),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: () async {
+                    final launched = await ExternalMapsService.openDirections(
+                      latitude: point.latitude,
+                      longitude: point.longitude,
+                      label: title,
+                    );
+                    if (!context.mounted) return;
+                    if (!launched) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('No maps application was available.'),
+                        ),
+                      );
+                    }
+                  },
+                  icon: const Icon(Icons.route_outlined),
+                  label: const Text('Open in Maps'),
+                ),
+              ),
+              if (allowClear) ...[
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: () {
+                      Navigator.of(context).pop();
+                      if (!mounted) return;
+                      setState(() {
+                        _navigationPin = null;
+                        _mapRevision++;
+                      });
+                    },
+                    icon: const Icon(Icons.close_rounded),
+                    label: const Text('Clear pin'),
+                  ),
+                ),
+              ],
+            ],
           ),
         ),
       ),
@@ -549,148 +931,6 @@ class _MapScreenState extends State<MapScreen> {
   }
 }
 
-class _AtlasHeaderCard extends StatelessWidget {
-  const _AtlasHeaderCard({required this.controller});
-
-  final AppController controller;
-
-  @override
-  Widget build(BuildContext context) {
-    return FantasyPanel(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-      background: const [
-        Color(0xC9131715),
-        Color(0xC91A1F1B),
-        Color(0xC914181A),
-      ],
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: 38,
-            height: 38,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(14),
-              gradient: const LinearGradient(
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-                colors: [
-                  Color(0xFFF0D8A8),
-                  Color(0xFFC48E4A),
-                ],
-              ),
-            ),
-            child: const Icon(
-              Icons.explore_outlined,
-              color: Color(0xFF17140F),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  AppConstants.appName,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                        fontWeight: FontWeight.w900,
-                      ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  controller.mapMode == MapMode.shared
-                      ? 'A map-first realm view: your trail, nearby adventurers, and approved landmarks.'
-                      : 'A map-first personal atlas that reveals only the places you have truly walked.',
-                  style: Theme.of(context).textTheme.bodySmall,
-                ),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _RealmCard extends StatelessWidget {
-  const _RealmCard({
-    required this.controller,
-    required this.onChanged,
-  });
-
-  final AppController controller;
-  final ValueChanged<MapMode> onChanged;
-
-  @override
-  Widget build(BuildContext context) {
-    return FantasyPanel(
-      padding: const EdgeInsets.all(14),
-      background: const [
-        Color(0xD4131715),
-        Color(0xD41A1F1B),
-        Color(0xD414181A),
-      ],
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Container(
-                width: 30,
-                height: 30,
-                decoration: BoxDecoration(
-                  color: const Color(0x22F2E8D1),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: const Icon(
-                  Icons.layers_outlined,
-                  size: 18,
-                  color: Color(0xFFF2E8D1),
-                ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'Realm View',
-                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                            fontWeight: FontWeight.w800,
-                          ),
-                    ),
-                    Text(
-                      controller.mapMode == MapMode.shared
-                          ? 'Your atlas blended with live realm activity.'
-                          : 'Stay focused on your own discovered world.',
-                      style: Theme.of(context).textTheme.bodySmall,
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 12),
-          MapModeToggle(
-            mode: controller.mapMode,
-            onChanged: onChanged,
-          ),
-          if (controller.mapMode == MapMode.shared && !controller.isSignedIn) ...[
-            const SizedBox(height: 10),
-            Text(
-              'Sign in from Atlas to enter the shared realm and see nearby adventurers.',
-              style: Theme.of(context).textTheme.bodySmall,
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-}
-
 class _MapActionButton extends StatelessWidget {
   const _MapActionButton({
     required this.icon,
@@ -736,11 +976,13 @@ class _StatusChip extends StatelessWidget {
     required this.label,
     required this.active,
     required this.loading,
+    this.progress,
   });
 
   final String label;
   final bool active;
   final bool loading;
+  final double? progress;
 
   @override
   Widget build(BuildContext context) {
@@ -755,36 +997,179 @@ class _StatusChip extends StatelessWidget {
               Color(0xC9271816),
               Color(0xC937211B),
             ],
-      child: Row(
+      child: Column(
         mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (loading)
-            const SizedBox(
-              width: 16,
-              height: 16,
-              child: CircularProgressIndicator(
-                strokeWidth: 2.0,
-                color: Color(0xFFF2E8D1),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              if (loading)
+                const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2.0,
+                    color: Color(0xFFF2E8D1),
+                  ),
+                )
+              else
+                Icon(
+                  active ? Icons.track_changes : Icons.warning_amber_rounded,
+                  size: 16,
+                  color: const Color(0xFFF2E8D1),
+                ),
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  label,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: Color(0xFFF2E8D1),
+                  ),
+                ),
               ),
-            )
-          else
-            Icon(
-              active ? Icons.track_changes : Icons.warning_amber_rounded,
-              size: 16,
-              color: const Color(0xFFF2E8D1),
-            ),
-          const SizedBox(width: 8),
-          Flexible(
-            child: Text(
-              label,
-              style: const TextStyle(
-                fontWeight: FontWeight.w700,
-                color: Color(0xFFF2E8D1),
-              ),
-            ),
+            ],
           ),
+          if (progress != null && progress! > 0 && progress! < 1) ...[
+            const SizedBox(height: 9),
+            FantasyProgressBar(
+              value: progress!,
+              height: 6,
+              fill: const [Color(0xFFC99758), Color(0xFFF0D9A6)],
+              trackColor: const Color(0x66322218),
+            ),
+          ],
         ],
       ),
     );
+  }
+}
+
+class _SharedRegionOutlineOverlay extends StatelessWidget {
+  const _SharedRegionOutlineOverlay({
+    required this.camera,
+    required this.outlines,
+    required this.revision,
+  });
+
+  final MapCamera camera;
+  final List<SharedRegionOutline> outlines;
+  final int revision;
+
+  @override
+  Widget build(BuildContext context) {
+    return CustomPaint(
+      painter: _SharedRegionOutlinePainter(
+        camera: camera,
+        outlines: outlines,
+        revision: revision,
+      ),
+      size: Size.infinite,
+    );
+  }
+}
+
+class _SharedRegionOutlinePainter extends CustomPainter {
+  _SharedRegionOutlinePainter({
+    required this.camera,
+    required this.outlines,
+    required this.revision,
+  }) : _outlineSignature = Object.hashAll(
+          outlines
+              .map((outline) => '${outline.regionId}:${outline.status.name}'),
+        );
+
+  final MapCamera camera;
+  final List<SharedRegionOutline> outlines;
+  final int revision;
+  final int _outlineSignature;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    for (final outline in outlines) {
+      final path = ui.Path();
+      final offsets = outline.points
+          .map(camera.latLngToScreenOffset)
+          .toList(growable: false);
+      if (offsets.length < 3) {
+        continue;
+      }
+
+      path.moveTo(offsets.first.dx, offsets.first.dy);
+      for (final offset in offsets.skip(1)) {
+        path.lineTo(offset.dx, offset.dy);
+      }
+      path.close();
+
+      final fillColor = switch (outline.status) {
+        SharedRegionStatus.syncing => const Color(0x1FB58A47),
+        SharedRegionStatus.synced => const Color(0x14247C66),
+        SharedRegionStatus.available => const Color(0x0A1B2024),
+      };
+      final borderColor = switch (outline.status) {
+        SharedRegionStatus.syncing => const Color(0xE6F0D39B),
+        SharedRegionStatus.synced => const Color(0xCC92D5BE),
+        SharedRegionStatus.available => const Color(0x88C7AF7A),
+      };
+
+      canvas.drawPath(
+        path,
+        Paint()
+          ..style = PaintingStyle.fill
+          ..color = fillColor,
+      );
+
+      final borderPaint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = outline.status == SharedRegionStatus.syncing ? 2.4 : 1.6
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..color = borderColor;
+
+      if (outline.status == SharedRegionStatus.available) {
+        _drawDashedPath(canvas, path, borderPaint,
+            dashLength: 12, gapLength: 8);
+      } else {
+        canvas.drawPath(path, borderPaint);
+      }
+
+      if (outline.status == SharedRegionStatus.syncing) {
+        canvas.drawPath(
+          path,
+          Paint()
+            ..style = PaintingStyle.stroke
+            ..strokeWidth = 4.8
+            ..color = const Color(0x2EF0D39B)
+            ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4),
+        );
+      }
+    }
+  }
+
+  void _drawDashedPath(
+    Canvas canvas,
+    ui.Path path,
+    Paint paint, {
+    required double dashLength,
+    required double gapLength,
+  }) {
+    for (final metric in path.computeMetrics()) {
+      var distance = 0.0;
+      while (distance < metric.length) {
+        final next = math.min(distance + dashLength, metric.length);
+        canvas.drawPath(metric.extractPath(distance, next), paint);
+        distance += dashLength + gapLength;
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _SharedRegionOutlinePainter oldDelegate) {
+    return oldDelegate._outlineSignature != _outlineSignature ||
+        oldDelegate.revision != revision ||
+        oldDelegate.camera.center != camera.center ||
+        oldDelegate.camera.zoom != camera.zoom ||
+        oldDelegate.camera.rotation != camera.rotation;
   }
 }

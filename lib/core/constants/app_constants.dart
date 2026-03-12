@@ -35,12 +35,24 @@ class AppConstants {
   static const int locationStreamDistanceFilterMeters = 3;
   static const int locationStreamIntervalSeconds = 3;
   static const int sharedViewportRefreshSeconds = 8;
-  static const int sharedViewportCacheTtlSeconds = 6;
   static const int sharedViewportDebounceMilliseconds = 650;
   static const int sharedViewportCacheMaxEntries = 24;
+  static const int sharedRegionSyncMapZoom = 17;
+  static const int sharedTilesPerRegionSide = 4;
+  static const int sharedRegionStarterRadiusMeters = 20000;
+  static const double sharedRegionOutlineMinZoom = 12.0;
+  static const int sharedRegionManifestCacheTtlSeconds = 30;
+  static const int sharedManifestFetchBatchSize = 4;
+  static const int sharedTileFetchBatchSize = 8;
+  static const int sharedRegionDoubleTapWindowMs = 360;
+  static const int sharedRegionAutoSyncCooldownSeconds = 12;
+  static const int sharedMaxVisibleRegionOutlines = 48;
+  static const int sharedVisibleTileHardLimit = 150;
   static const int sharedViewportPersistedCacheMaxAgeHours = 24;
   static const int sharedViewportPersistedCellLimit = 30000;
   static const int sharedViewportPersistedLandmarkLimit = 2000;
+  static const int sharedViewportPersistedTileVersionLimit = 12000;
+  static const int sharedViewportPersistedRegionLimit = 2400;
   static const int cloudSyncBatchSize = 200;
   static const int personalBootstrapRefreshHours = 12;
 

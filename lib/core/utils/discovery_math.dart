@@ -166,6 +166,7 @@ class DiscoveryMath {
     required double minLon,
     required double maxLon,
     required int mapZoom,
+    int? maxTileCount,
   }) {
     final northWest = _slippyTile(maxLat, minLon, mapZoom);
     final southEast = _slippyTile(minLat, maxLon, mapZoom);
@@ -174,6 +175,11 @@ class DiscoveryMath {
     final minY = math.min(northWest.y, southEast.y);
     final maxY = math.max(northWest.y, southEast.y);
 
+    final tileCount = (maxX - minX + 1) * (maxY - minY + 1);
+    if (maxTileCount != null && tileCount > maxTileCount) {
+      return const <String>[];
+    }
+
     final ids = <String>[];
     for (var x = minX; x <= maxX; x++) {
       for (var y = minY; y <= maxY; y++) {
@@ -181,6 +187,153 @@ class DiscoveryMath {
       }
     }
     return ids;
+  }
+
+  static String sharedRegionIdForTileId(
+    String tileId, {
+    int tilesPerRegion = 4,
+  }) {
+    final parts = tileId.split('/');
+    if (parts.length != 3) {
+      throw FormatException('Invalid shared tile id: $tileId');
+    }
+
+    final z = int.parse(parts[0].substring(1));
+    final x = int.parse(parts[1].substring(1));
+    final y = int.parse(parts[2].substring(1));
+    return 'z$z/rx${x ~/ tilesPerRegion}/ry${y ~/ tilesPerRegion}';
+  }
+
+  static List<String> sharedRegionIdsForTileIds(
+    Iterable<String> tileIds, {
+    int tilesPerRegion = 4,
+  }) {
+    final ids = tileIds
+        .map(
+          (tileId) => sharedRegionIdForTileId(
+            tileId,
+            tilesPerRegion: tilesPerRegion,
+          ),
+        )
+        .toSet()
+        .toList(growable: false)
+      ..sort();
+    return ids;
+  }
+
+  static String sharedRegionIdForPoint(
+    LatLng point, {
+    required int mapZoom,
+    int tilesPerRegion = 4,
+  }) {
+    final tile = _slippyTile(point.latitude, point.longitude, mapZoom);
+    return 'z${tile.z}/rx${tile.x ~/ tilesPerRegion}/ry${tile.y ~/ tilesPerRegion}';
+  }
+
+  static List<String> sharedRegionIdsForBounds({
+    required double minLat,
+    required double maxLat,
+    required double minLon,
+    required double maxLon,
+    required int mapZoom,
+    int tilesPerRegion = 4,
+    int? maxRegionCount,
+  }) {
+    final northWest = _slippyTile(maxLat, minLon, mapZoom);
+    final southEast = _slippyTile(minLat, maxLon, mapZoom);
+    final minX = math.min(northWest.x, southEast.x);
+    final maxX = math.max(northWest.x, southEast.x);
+    final minY = math.min(northWest.y, southEast.y);
+    final maxY = math.max(northWest.y, southEast.y);
+
+    final minRx = minX ~/ tilesPerRegion;
+    final maxRx = maxX ~/ tilesPerRegion;
+    final minRy = minY ~/ tilesPerRegion;
+    final maxRy = maxY ~/ tilesPerRegion;
+    final regionCount = (maxRx - minRx + 1) * (maxRy - minRy + 1);
+    if (maxRegionCount != null && regionCount > maxRegionCount) {
+      return const <String>[];
+    }
+
+    final ids = <String>[];
+    for (var rx = minRx; rx <= maxRx; rx++) {
+      for (var ry = minRy; ry <= maxRy; ry++) {
+        ids.add('z${northWest.z}/rx$rx/ry$ry');
+      }
+    }
+    return ids;
+  }
+
+  static List<LatLng> sharedRegionOutlinePoints(
+    String regionId, {
+    int tilesPerRegion = 4,
+  }) {
+    final parts = regionId.split('/');
+    if (parts.length != 3) {
+      throw FormatException('Invalid shared region id: $regionId');
+    }
+
+    final z = int.parse(parts[0].substring(1));
+    final rx = int.parse(parts[1].substring(2));
+    final ry = int.parse(parts[2].substring(2));
+    final minX = rx * tilesPerRegion;
+    final minY = ry * tilesPerRegion;
+    final maxX = minX + tilesPerRegion;
+    final maxY = minY + tilesPerRegion;
+
+    final northWest = _tileCornerToLatLng(x: minX, y: minY, z: z);
+    final northEast = _tileCornerToLatLng(x: maxX, y: minY, z: z);
+    final southEast = _tileCornerToLatLng(x: maxX, y: maxY, z: z);
+    final southWest = _tileCornerToLatLng(x: minX, y: maxY, z: z);
+
+    return <LatLng>[
+      northWest,
+      northEast,
+      southEast,
+      southWest,
+    ];
+  }
+
+  static List<String> sharedTileIdsForRegion(
+    String regionId, {
+    int tilesPerRegion = 4,
+  }) {
+    final parts = regionId.split('/');
+    if (parts.length != 3) {
+      throw FormatException('Invalid shared region id: $regionId');
+    }
+
+    final z = int.parse(parts[0].substring(1));
+    final rx = int.parse(parts[1].substring(2));
+    final ry = int.parse(parts[2].substring(2));
+    final minX = rx * tilesPerRegion;
+    final minY = ry * tilesPerRegion;
+
+    final tileIds = <String>[];
+    for (var x = minX; x < minX + tilesPerRegion; x++) {
+      for (var y = minY; y < minY + tilesPerRegion; y++) {
+        tileIds.add('z$z/x$x/y$y');
+      }
+    }
+    return tileIds;
+  }
+
+  static ({double minLat, double maxLat, double minLon, double maxLon})
+      boundsAroundPoint({
+    required LatLng point,
+    required double radiusMeters,
+  }) {
+    final latDelta = radiusMeters / 111320.0;
+    var cosLat = math.cos(point.latitude * math.pi / 180.0).abs();
+    if (cosLat < 0.15) cosLat = 0.15;
+    final lonDelta = radiusMeters / (111320.0 * cosLat);
+
+    return (
+      minLat: point.latitude - latDelta,
+      maxLat: point.latitude + latDelta,
+      minLon: point.longitude - lonDelta,
+      maxLon: point.longitude + lonDelta,
+    );
   }
 
   static double coveragePercent({
@@ -206,6 +359,20 @@ class DiscoveryMath {
       y: y.clamp(0, n.toInt() - 1),
       z: z,
     );
+  }
+
+  static LatLng _tileCornerToLatLng({
+    required int x,
+    required int y,
+    required int z,
+  }) {
+    final n = math.pow(2.0, z).toDouble();
+    final lon = (x / n) * 360.0 - 180.0;
+    final mercator = math.pi * (1 - (2 * y) / n);
+    final sinhValue = (math.exp(mercator) - math.exp(-mercator)) / 2.0;
+    final latRad = math.atan(sinhValue);
+    final lat = latRad * 180.0 / math.pi;
+    return LatLng(lat, lon);
   }
 }
 

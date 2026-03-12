@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 class StatFormatters {
   static String wholeNumber(int value) {
     final sign = value < 0 ? '-' : '';
@@ -30,7 +32,43 @@ class StatFormatters {
     return '${kilometers.toStringAsFixed(fractionDigits)} km';
   }
 
-  static String percent(double value, {int fractionDigits = 6}) {
-    return '${value.toStringAsFixed(fractionDigits)}%';
+  static String percent(
+    double value, {
+    int fractionDigits = 6,
+    int maxFractionDigits = 12,
+  }) {
+    if (!value.isFinite) {
+      return '0%';
+    }
+
+    final normalized = value == 0 ? 0.0 : value;
+    var digits = fractionDigits < 0 ? 0 : fractionDigits;
+    final cappedMax = maxFractionDigits < digits ? digits : maxFractionDigits;
+
+    final absValue = normalized.abs();
+    if (absValue > 0) {
+      final leadingZeroDigits = (-math.log(absValue) / math.ln10).ceil();
+      final precisionForTinyValue = leadingZeroDigits + 1;
+      if (precisionForTinyValue > digits) {
+        digits = precisionForTinyValue > cappedMax
+            ? cappedMax
+            : precisionForTinyValue;
+      }
+    }
+
+    final formatted = normalized.toStringAsFixed(digits);
+    if (normalized > 0 && double.parse(formatted) == 0 && digits >= cappedMax) {
+      return '<${(1 / _powerOfTen(cappedMax)).toStringAsFixed(cappedMax)}%';
+    }
+
+    return '$formatted%';
+  }
+
+  static double _powerOfTen(int exponent) {
+    var result = 1.0;
+    for (var index = 0; index < exponent; index++) {
+      result *= 10;
+    }
+    return result;
   }
 }

@@ -66,6 +66,10 @@ class AppController extends ChangeNotifier {
   final Map<String, _SharedViewportCacheEntry> _sharedViewportCache = {};
   final Map<String, SharedCell> _sharedCellStore = {};
   final Map<String, SharedLandmark> _sharedLandmarkStore = {};
+  final Map<String, String> _sharedTileVersionStore = {};
+  final Map<String, _SharedTileMembershipEntry> _sharedTileMembershipIndex = {};
+  final Set<String> _sharedSyncedRegionIds = <String>{};
+  final Set<String> _sharedSyncingRegionIds = <String>{};
   String _sharedStoreGeneratedAt = '';
 
   bool _initialized = false;
@@ -82,11 +86,27 @@ class AppController extends ChangeNotifier {
   bool _sharedViewportRequestInFlight = false;
   MapCamera? _queuedSharedViewportCamera;
   String? _activeSharedViewportCacheKey;
+  int _sharedSyncCompleted = 0;
+  int _sharedSyncTotal = 0;
+  DateTime? _sharedSyncStartedAt;
+  String? _sharedSyncTargetLabel;
+  String? _lastAutoSharedRegionId;
+  DateTime? _lastAutoSharedRegionQueuedAt;
 
   bool get initialized => _initialized;
   bool get tracking => _tracking;
   bool get busy => _busy;
   bool get sharedLoading => _sharedLoading;
+  double? get sharedSyncProgress =>
+      _sharedSyncTotal > 0 ? _sharedSyncCompleted / _sharedSyncTotal : null;
+  String? get sharedSyncLabel {
+    if (_sharedSyncTotal <= 0) return null;
+    final prefix = _sharedSyncTargetLabel ?? 'Syncing realm';
+    final progress = '$_sharedSyncCompleted/$_sharedSyncTotal';
+    final eta = _sharedSyncEtaLabel;
+    return eta == null ? '$prefix $progress' : '$prefix $progress · $eta';
+  }
+
   String? get error => _error;
   PlayerProfile get profile => _profile;
   LatLng? get currentLatLng => _currentLatLng;
@@ -99,6 +119,7 @@ class AppController extends ChangeNotifier {
   List<PendingLandmark> get pendingLandmarks => _pendingLandmarks;
   bool get waitingForAccurateLocation =>
       _tracking && !_busy && _currentLatLng == null;
+  bool get hasSeenMapGuide => _profile.hasSeenMapGuide;
 
   bool get isSignedIn => authService.isSignedIn;
   bool get isAdminOrModerator =>
@@ -183,6 +204,50 @@ class AppController extends ChangeNotifier {
   }
 
   List<SharedLandmark> get sharedLandmarks => _sharedViewport.landmarks;
+  bool get hasSharedCache =>
+      _sharedCellStore.isNotEmpty || _sharedLandmarkStore.isNotEmpty;
+
+  List<SharedRegionOutline> visibleSharedRegionsFor(MapCamera camera) {
+    if (camera.zoom < AppConstants.sharedRegionOutlineMinZoom) {
+      return const <SharedRegionOutline>[];
+    }
+
+    final bounds = camera.visibleBounds;
+    final regionIds = DiscoveryMath.sharedRegionIdsForBounds(
+      minLat: bounds.southEast.latitude,
+      maxLat: bounds.northWest.latitude,
+      minLon: bounds.northWest.longitude,
+      maxLon: bounds.southEast.longitude,
+      mapZoom: AppConstants.sharedRegionSyncMapZoom,
+      tilesPerRegion: AppConstants.sharedTilesPerRegionSide,
+      maxRegionCount: AppConstants.sharedMaxVisibleRegionOutlines,
+    );
+
+    return regionIds
+        .map(
+          (regionId) => SharedRegionOutline(
+            regionId: regionId,
+            points: DiscoveryMath.sharedRegionOutlinePoints(
+              regionId,
+              tilesPerRegion: AppConstants.sharedTilesPerRegionSide,
+            ),
+            status: _sharedSyncingRegionIds.contains(regionId)
+                ? SharedRegionStatus.syncing
+                : _sharedSyncedRegionIds.contains(regionId)
+                    ? SharedRegionStatus.synced
+                    : SharedRegionStatus.available,
+          ),
+        )
+        .toList(growable: false);
+  }
+
+  String sharedRegionIdForPoint(LatLng point) {
+    return DiscoveryMath.sharedRegionIdForPoint(
+      point,
+      mapZoom: AppConstants.sharedRegionSyncMapZoom,
+      tilesPerRegion: AppConstants.sharedTilesPerRegionSide,
+    );
+  }
 
   Future<void> init() async {
     await authService.init();
@@ -374,6 +439,17 @@ class AppController extends ChangeNotifier {
     await shareService.shareProfile(_profile);
   }
 
+  Future<void> markMapGuideSeen() async {
+    if (_profile.hasSeenMapGuide) return;
+
+    _profile = _profile.copyWith(
+      hasSeenMapGuide: true,
+      updatedAtIso: DateTime.now().toUtc().toIso8601String(),
+    );
+    await localProfileStore.save(_profile, profileKey: _activeProfileKey);
+    notifyListeners();
+  }
+
   void clearError() {
     _error = null;
     notifyListeners();
@@ -400,6 +476,7 @@ class AppController extends ChangeNotifier {
 
     if (_mapMode == MapMode.shared && camera != null) {
       await refreshSharedViewport(camera);
+      unawaited(_syncStarterSharedArea(camera: camera));
     }
   }
 
@@ -409,14 +486,16 @@ class AppController extends ChangeNotifier {
   }) async {
     if (!isSignedIn || _mapMode != MapMode.shared) return;
 
+    if (!sharedTileService.isConfigured) {
+      _error = 'Shared realm delivery is not configured.';
+      notifyListeners();
+      return;
+    }
+
     _ensureSharedViewportPolling();
     final cacheKey = _sharedViewportCacheKeyFor(camera);
     final cachedEntry = _sharedViewportCache[cacheKey];
     final storedViewport = _storedSharedViewportFor(camera);
-    final now = DateTime.now().toUtc();
-    final hasFreshCache = cachedEntry != null &&
-        now.difference(cachedEntry.fetchedAt).inSeconds <
-            AppConstants.sharedViewportCacheTtlSeconds;
     final hasAppliedCache = cachedEntry != null &&
         _applySharedViewportSnapshot(
           cacheKey: cacheKey,
@@ -428,12 +507,13 @@ class AppController extends ChangeNotifier {
           viewport: storedViewport,
         );
 
-    if (!force && hasFreshCache) {
-      if (hasAppliedCache || hasAppliedStoredViewport) {
-        notifyListeners();
-      }
-      return;
+    if (hasAppliedCache || hasAppliedStoredViewport) {
+      notifyListeners();
     }
+
+    final syncedVisibleRegionIds = _visibleSharedRegionIdsForCamera(camera)
+        .where(_sharedSyncedRegionIds.contains)
+        .toList(growable: false);
 
     if (_sharedViewportRequestInFlight) {
       _queuedSharedViewportCamera = camera;
@@ -443,41 +523,53 @@ class AppController extends ChangeNotifier {
       return;
     }
 
-    final shouldShowLoading = cachedEntry == null &&
-        storedViewport == null &&
-        (_activeSharedViewportCacheKey != cacheKey ||
-            _sharedViewport.cells.isEmpty);
-    if (shouldShowLoading) {
-      _sharedLoading = true;
-      notifyListeners();
-    } else if (hasAppliedCache || hasAppliedStoredViewport) {
-      notifyListeners();
-    }
-
     _sharedViewportRequestInFlight = true;
 
     try {
-      final bounds = camera.visibleBounds;
-      final minLat = bounds.southEast.latitude;
-      final maxLat = bounds.northWest.latitude;
-      final minLon = bounds.northWest.longitude;
-      final maxLon = bounds.southEast.longitude;
-      final zoom = camera.zoom.round();
+      SharedTileFetchResult? tileFetch;
+      if (syncedVisibleRegionIds.isNotEmpty) {
+        tileFetch = await sharedTileService.getRegions(
+          worldId: BackendConfig.defaultWorldId,
+          regionIds: syncedVisibleRegionIds,
+          knownTileVersions:
+              force ? const <String, String>{} : _sharedTileVersionStore,
+        );
+        if (tileFetch.tileSnapshots.isNotEmpty) {
+          _applySharedTileSnapshots(tileFetch.tileSnapshots);
+        }
+        if (tileFetch.tileVersions.isNotEmpty) {
+          _sharedTileVersionStore.addAll(tileFetch.tileVersions);
+        }
+        _sharedSyncedRegionIds.addAll(tileFetch.regionIds);
+      }
 
-      final viewport = await _fetchSharedViewport(
-        minLat: minLat,
-        maxLat: maxLat,
-        minLon: minLon,
-        maxLon: maxLon,
-        zoom: zoom,
+      final players = await _fetchSharedPresence(camera);
+      final mergedViewport = _storedSharedViewportFor(camera) ??
+          SharedViewportResponse(
+            worldId: BackendConfig.defaultWorldId,
+            cells: const <SharedCell>[],
+            players: const <SharedPlayer>[],
+            landmarks: const <SharedLandmark>[],
+            generatedAt: _sharedStoreGeneratedAt,
+          );
+
+      final viewport = SharedViewportResponse(
+        worldId: mergedViewport.worldId,
+        cells: mergedViewport.cells,
+        players: players,
+        landmarks: mergedViewport.landmarks,
+        generatedAt: tileFetch?.generatedAt.isNotEmpty == true
+            ? tileFetch!.generatedAt
+            : mergedViewport.generatedAt,
+      ).copyWithMetadata(
+        tileVersions: Map<String, String>.from(_sharedTileVersionStore),
       );
-      _mergeSharedViewportStore(viewport);
+
       _cacheSharedViewport(
         cacheKey: cacheKey,
         viewport: viewport,
         fetchedAt: DateTime.now().toUtc(),
       );
-
       _applySharedViewportSnapshot(
         cacheKey: cacheKey,
         viewport: viewport,
@@ -486,7 +578,6 @@ class AppController extends ChangeNotifier {
       _error = e.toString();
     } finally {
       _sharedViewportRequestInFlight = false;
-      _sharedLoading = false;
       notifyListeners();
 
       final queuedCamera = _queuedSharedViewportCamera;
@@ -508,6 +599,144 @@ class AppController extends ChangeNotifier {
           milliseconds: AppConstants.sharedViewportDebounceMilliseconds),
       () => refreshSharedViewport(camera),
     );
+  }
+
+  Future<void> syncSharedRegionAtPoint(
+    LatLng point, {
+    MapCamera? camera,
+    bool force = false,
+  }) async {
+    final regionId = sharedRegionIdForPoint(point);
+    await _syncSharedRegions(
+      <String>[regionId],
+      camera: camera ?? mapController.camera,
+      force: force,
+      targetLabel: 'Syncing selected realm',
+    );
+  }
+
+  Future<void> _syncStarterSharedArea({MapCamera? camera}) async {
+    if (!isSignedIn ||
+        _mapMode != MapMode.shared ||
+        !sharedTileService.isConfigured) {
+      return;
+    }
+
+    final anchor = _currentLatLng ?? _savedMapCenterLatLng;
+    if (anchor == null) return;
+
+    final bounds = DiscoveryMath.boundsAroundPoint(
+      point: anchor,
+      radiusMeters: AppConstants.sharedRegionStarterRadiusMeters.toDouble(),
+    );
+    final regionIds = DiscoveryMath.sharedRegionIdsForBounds(
+      minLat: bounds.minLat,
+      maxLat: bounds.maxLat,
+      minLon: bounds.minLon,
+      maxLon: bounds.maxLon,
+      mapZoom: AppConstants.sharedRegionSyncMapZoom,
+      tilesPerRegion: AppConstants.sharedTilesPerRegionSide,
+    )
+        .where((regionId) => !_sharedSyncedRegionIds.contains(regionId))
+        .toList(growable: false);
+
+    if (regionIds.isEmpty) return;
+
+    await _syncSharedRegions(
+      regionIds,
+      camera: camera ?? mapController.camera,
+      targetLabel: 'Syncing nearby realm',
+    );
+  }
+
+  Future<void> _syncSharedRegions(
+    Iterable<String> regionIds, {
+    required MapCamera camera,
+    required String targetLabel,
+    bool force = false,
+  }) async {
+    if (!isSignedIn ||
+        _mapMode != MapMode.shared ||
+        !sharedTileService.isConfigured) {
+      return;
+    }
+
+    final normalizedRegionIds = regionIds.toSet().toList(growable: false)
+      ..sort();
+    if (normalizedRegionIds.isEmpty) return;
+
+    final pendingRegionIds = force
+        ? normalizedRegionIds
+        : normalizedRegionIds
+            .where((regionId) => !_sharedSyncingRegionIds.contains(regionId))
+            .toList(growable: false);
+    if (pendingRegionIds.isEmpty) return;
+
+    _sharedSyncingRegionIds.addAll(pendingRegionIds);
+    _sharedLoading = true;
+    _sharedSyncTargetLabel = targetLabel;
+    _sharedSyncStartedAt = DateTime.now().toUtc();
+    _sharedSyncCompleted = 0;
+    _sharedSyncTotal = pendingRegionIds.length;
+    notifyListeners();
+
+    try {
+      final fetched = await sharedTileService.getRegions(
+        worldId: BackendConfig.defaultWorldId,
+        regionIds: pendingRegionIds,
+        knownTileVersions:
+            force ? const <String, String>{} : _sharedTileVersionStore,
+        onProgress: _setSharedSyncProgress,
+      );
+      if (fetched.tileSnapshots.isNotEmpty) {
+        _applySharedTileSnapshots(fetched.tileSnapshots);
+      }
+      if (fetched.tileVersions.isNotEmpty) {
+        _sharedTileVersionStore.addAll(fetched.tileVersions);
+      }
+      _sharedSyncedRegionIds.addAll(fetched.regionIds);
+      _scheduleSharedCachePersist(worldId: fetched.worldId);
+
+      final players = await _fetchSharedPresence(camera);
+      final mergedViewport = _storedSharedViewportFor(camera) ??
+          SharedViewportResponse(
+            worldId: fetched.worldId,
+            cells: const <SharedCell>[],
+            players: const <SharedPlayer>[],
+            landmarks: const <SharedLandmark>[],
+            generatedAt: _sharedStoreGeneratedAt,
+          );
+      final viewport = SharedViewportResponse(
+        worldId: mergedViewport.worldId,
+        cells: mergedViewport.cells,
+        players: players,
+        landmarks: mergedViewport.landmarks,
+        generatedAt: fetched.generatedAt.isNotEmpty
+            ? fetched.generatedAt
+            : mergedViewport.generatedAt,
+      ).copyWithMetadata(
+        tileVersions: Map<String, String>.from(_sharedTileVersionStore),
+      );
+      final cacheKey = _sharedViewportCacheKeyFor(camera);
+      _cacheSharedViewport(
+        cacheKey: cacheKey,
+        viewport: viewport,
+        fetchedAt: DateTime.now().toUtc(),
+      );
+      _applySharedViewportSnapshot(
+        cacheKey: cacheKey,
+        viewport: viewport,
+      );
+    } catch (e) {
+      _error = e.toString();
+    } finally {
+      _sharedSyncingRegionIds.removeAll(pendingRegionIds);
+      _sharedLoading = false;
+      _sharedSyncTargetLabel = null;
+      _sharedSyncStartedAt = null;
+      _clearSharedSyncProgress();
+      notifyListeners();
+    }
   }
 
   Future<void> uploadLandmark({
@@ -761,6 +990,7 @@ class AppController extends ChangeNotifier {
 
     await localProfileStore.save(_profile, profileKey: _activeProfileKey);
     _scheduleCloudSync();
+    _maybeAutoSyncCurrentSharedRegion(point);
     notifyListeners();
   }
 
@@ -965,71 +1195,65 @@ class AppController extends ChangeNotifier {
     super.dispose();
   }
 
-  Future<SharedViewportResponse> _fetchSharedViewport({
-    required double minLat,
-    required double maxLat,
-    required double minLon,
-    required double maxLon,
-    required int zoom,
-  }) async {
-    if (!sharedTileService.isConfigured) {
-      return appsyncService.getSharedViewport(
-        minLat: minLat,
-        maxLat: maxLat,
-        minLon: minLon,
-        maxLon: maxLon,
-        zoom: zoom,
-      );
+  List<String> _visibleSharedRegionIdsForCamera(MapCamera camera) {
+    if (camera.zoom < AppConstants.sharedRegionOutlineMinZoom) {
+      return const <String>[];
     }
 
-    try {
-      final results = await Future.wait([
-        sharedTileService.getViewport(
-          worldId: BackendConfig.defaultWorldId,
-          minLat: minLat,
-          maxLat: maxLat,
-          minLon: minLon,
-          maxLon: maxLon,
-          zoom: zoom,
-        ),
-        appsyncService.getSharedPresence(
-          minLat: minLat,
-          maxLat: maxLat,
-          minLon: minLon,
-          maxLon: maxLon,
-          zoom: zoom,
-        ),
-      ]);
+    final bounds = camera.visibleBounds;
+    return DiscoveryMath.sharedRegionIdsForBounds(
+      minLat: bounds.southEast.latitude,
+      maxLat: bounds.northWest.latitude,
+      minLon: bounds.northWest.longitude,
+      maxLon: bounds.southEast.longitude,
+      mapZoom: AppConstants.sharedRegionSyncMapZoom,
+      tilesPerRegion: AppConstants.sharedTilesPerRegionSide,
+      maxRegionCount: AppConstants.sharedMaxVisibleRegionOutlines,
+    );
+  }
 
-      final tileViewport = results[0] as SharedViewportResponse;
-      final players = results[1] as List<SharedPlayer>;
+  Future<List<SharedPlayer>> _fetchSharedPresence(MapCamera camera) async {
+    final bounds = camera.visibleBounds;
+    return appsyncService.getSharedPresence(
+      minLat: bounds.southEast.latitude,
+      maxLat: bounds.northWest.latitude,
+      minLon: bounds.northWest.longitude,
+      maxLon: bounds.southEast.longitude,
+      zoom: camera.zoom.round(),
+    );
+  }
 
-      if (!tileViewport.hasTilePayload) {
-        return appsyncService.getSharedViewport(
-          minLat: minLat,
-          maxLat: maxLat,
-          minLon: minLon,
-          maxLon: maxLon,
-          zoom: zoom,
-        );
-      }
-
-      return SharedViewportResponse(
-        worldId: tileViewport.worldId,
-        cells: tileViewport.cells,
-        players: players,
-        landmarks: tileViewport.landmarks,
-        generatedAt: tileViewport.generatedAt,
-      );
-    } catch (_) {
-      return appsyncService.getSharedViewport(
-        minLat: minLat,
-        maxLat: maxLat,
-        minLon: minLon,
-        maxLon: maxLon,
-        zoom: zoom,
-      );
+  void _maybeAutoSyncCurrentSharedRegion(LatLng point) {
+    if (!isSignedIn ||
+        _mapMode != MapMode.shared ||
+        !sharedTileService.isConfigured) {
+      return;
     }
+
+    final regionId = sharedRegionIdForPoint(point);
+    if (_sharedSyncedRegionIds.contains(regionId) ||
+        _sharedSyncingRegionIds.contains(regionId)) {
+      _lastAutoSharedRegionId = regionId;
+      return;
+    }
+
+    final now = DateTime.now().toUtc();
+    if (_lastAutoSharedRegionId == regionId &&
+        _lastAutoSharedRegionQueuedAt != null &&
+        now.difference(_lastAutoSharedRegionQueuedAt!).inSeconds <
+            AppConstants.sharedRegionAutoSyncCooldownSeconds) {
+      return;
+    }
+
+    _lastAutoSharedRegionId = regionId;
+    _lastAutoSharedRegionQueuedAt = now;
+    unawaited(
+      _syncSharedRegions(
+        <String>[regionId],
+        camera: mapController.camera,
+        targetLabel: 'Syncing nearby region',
+      ),
+    );
   }
 
   String get _syncDisplayName =>
@@ -1224,40 +1448,49 @@ class AppController extends ChangeNotifier {
     );
   }
 
-  void _mergeSharedViewportStore(SharedViewportResponse viewport) {
-    var changed = false;
+  void _applySharedTileSnapshots(List<SharedTileSnapshot> snapshots) {
+    if (snapshots.isEmpty) return;
 
-    for (final cell in viewport.cells) {
-      final existing = _sharedCellStore[cell.cellId];
-      if (existing == null ||
-          cell.lastDiscoveredAt.compareTo(existing.lastDiscoveredAt) >= 0) {
-        if (existing != cell) {
-          _sharedCellStore[cell.cellId] = cell;
-          changed = true;
+    for (final snapshot in snapshots) {
+      final existingMembership = _sharedTileMembershipIndex[snapshot.tileId];
+      if (existingMembership != null) {
+        for (final cellId in existingMembership.cellIds) {
+          _sharedCellStore.remove(cellId);
+        }
+        for (final landmarkId in existingMembership.landmarkIds) {
+          _sharedLandmarkStore.remove(landmarkId);
+        }
+      }
+
+      final cellIds = <String>{};
+      for (final cell in snapshot.cells) {
+        _sharedCellStore[cell.cellId] = cell;
+        cellIds.add(cell.cellId);
+      }
+
+      final landmarkIds = <String>{};
+      for (final landmark in snapshot.landmarks) {
+        _sharedLandmarkStore[landmark.landmarkId] = landmark;
+        landmarkIds.add(landmark.landmarkId);
+      }
+
+      _sharedTileMembershipIndex[snapshot.tileId] = _SharedTileMembershipEntry(
+        cellIds: cellIds,
+        landmarkIds: landmarkIds,
+      );
+      if (snapshot.generatedAt.isNotEmpty) {
+        _sharedTileVersionStore[snapshot.tileId] = snapshot.generatedAt;
+        if (snapshot.generatedAt.compareTo(_sharedStoreGeneratedAt) >= 0) {
+          _sharedStoreGeneratedAt = snapshot.generatedAt;
         }
       }
     }
-    for (final landmark in viewport.landmarks) {
-      final existing = _sharedLandmarkStore[landmark.landmarkId];
-      final existingCreatedAt = existing?.createdAt ?? '';
-      final incomingCreatedAt = landmark.createdAt ?? '';
-      if (existing == null ||
-          incomingCreatedAt.compareTo(existingCreatedAt) >= 0) {
-        if (existing != landmark) {
-          _sharedLandmarkStore[landmark.landmarkId] = landmark;
-          changed = true;
-        }
-      }
-    }
 
-    if (viewport.generatedAt.isNotEmpty &&
-        viewport.generatedAt.compareTo(_sharedStoreGeneratedAt) >= 0) {
-      _sharedStoreGeneratedAt = viewport.generatedAt;
-    }
-
-    if (changed) {
-      _scheduleSharedCachePersist(worldId: viewport.worldId);
-    }
+    _scheduleSharedCachePersist(
+      worldId: snapshots.first.worldId.isEmpty
+          ? BackendConfig.defaultWorldId
+          : snapshots.first.worldId,
+    );
   }
 
   SharedViewportResponse? _storedSharedViewportFor(MapCamera camera) {
@@ -1323,10 +1556,19 @@ class AppController extends ChangeNotifier {
     _queuedSharedViewportCamera = null;
     _activeSharedViewportCacheKey = null;
     _sharedStoreGeneratedAt = '';
+    _clearSharedSyncProgress();
+    _sharedSyncingRegionIds.clear();
+    _sharedSyncedRegionIds.clear();
+    _sharedSyncStartedAt = null;
+    _sharedSyncTargetLabel = null;
+    _lastAutoSharedRegionId = null;
+    _lastAutoSharedRegionQueuedAt = null;
     if (clearCache) {
       _sharedViewportCache.clear();
       _sharedCellStore.clear();
       _sharedLandmarkStore.clear();
+      _sharedTileVersionStore.clear();
+      _sharedTileMembershipIndex.clear();
     }
   }
 
@@ -1355,7 +1597,14 @@ class AppController extends ChangeNotifier {
           (landmark) => MapEntry(landmark.landmarkId, landmark),
         ),
       );
+    _sharedTileVersionStore
+      ..clear()
+      ..addAll(snapshot.tileVersions);
+    _sharedSyncedRegionIds
+      ..clear()
+      ..addAll(snapshot.syncedRegionIds);
     _sharedStoreGeneratedAt = snapshot.generatedAt;
+    _rebuildSharedTileMembershipIndex();
   }
 
   void _scheduleSharedCachePersist({required String worldId}) {
@@ -1376,6 +1625,14 @@ class AppController extends ChangeNotifier {
             .toList(growable: false),
         landmarks: sortedLandmarks
             .take(AppConstants.sharedViewportPersistedLandmarkLimit)
+            .toList(growable: false),
+        tileVersions: Map<String, String>.fromEntries(
+          _sharedTileVersionStore.entries.take(
+            AppConstants.sharedViewportPersistedTileVersionLimit,
+          ),
+        ),
+        syncedRegionIds: _sharedSyncedRegionIds
+            .take(AppConstants.sharedViewportPersistedRegionLimit)
             .toList(growable: false),
       );
 
@@ -1405,6 +1662,65 @@ class AppController extends ChangeNotifier {
   void _stopSharedViewportPolling() {
     _sharedViewportPollTimer?.cancel();
     _sharedViewportPollTimer = null;
+  }
+
+  void _rebuildSharedTileMembershipIndex() {
+    _sharedTileMembershipIndex.clear();
+
+    for (final cell in _sharedCellStore.values) {
+      if (cell.tileId.isEmpty) continue;
+      final entry = _sharedTileMembershipIndex.putIfAbsent(
+        cell.tileId,
+        () => _SharedTileMembershipEntry.empty(),
+      );
+      entry.cellIds.add(cell.cellId);
+    }
+
+    for (final landmark in _sharedLandmarkStore.values) {
+      if (landmark.tileId.isEmpty) continue;
+      final entry = _sharedTileMembershipIndex.putIfAbsent(
+        landmark.tileId,
+        () => _SharedTileMembershipEntry.empty(),
+      );
+      entry.landmarkIds.add(landmark.landmarkId);
+    }
+  }
+
+  void _setSharedSyncProgress(int completed, int total) {
+    if (_sharedSyncCompleted == completed && _sharedSyncTotal == total) {
+      return;
+    }
+    _sharedSyncCompleted = completed;
+    _sharedSyncTotal = total;
+    if (_sharedLoading) {
+      notifyListeners();
+    }
+  }
+
+  String? get _sharedSyncEtaLabel {
+    final startedAt = _sharedSyncStartedAt;
+    if (startedAt == null ||
+        _sharedSyncCompleted <= 0 ||
+        _sharedSyncTotal <= _sharedSyncCompleted) {
+      return null;
+    }
+
+    final elapsedSeconds =
+        DateTime.now().toUtc().difference(startedAt).inMilliseconds / 1000.0;
+    if (elapsedSeconds <= 0) return null;
+
+    final averageSecondsPerStep = elapsedSeconds / _sharedSyncCompleted;
+    final remainingSteps = _sharedSyncTotal - _sharedSyncCompleted;
+    final remainingSeconds = (averageSecondsPerStep * remainingSteps).round();
+    if (remainingSeconds <= 0) return null;
+    return remainingSeconds >= 60
+        ? '~${(remainingSeconds / 60).ceil()}m left'
+        : '~${remainingSeconds}s left';
+  }
+
+  void _clearSharedSyncProgress() {
+    _sharedSyncCompleted = 0;
+    _sharedSyncTotal = 0;
   }
 
   LatLng _averageLatLng(List<_AcceptedLocation> samples) {
@@ -1473,4 +1789,18 @@ class _SharedViewportCacheEntry {
 
   final SharedViewportResponse viewport;
   final DateTime fetchedAt;
+}
+
+class _SharedTileMembershipEntry {
+  const _SharedTileMembershipEntry({
+    required this.cellIds,
+    required this.landmarkIds,
+  });
+
+  _SharedTileMembershipEntry.empty()
+      : cellIds = <String>{},
+        landmarkIds = <String>{};
+
+  final Set<String> cellIds;
+  final Set<String> landmarkIds;
 }

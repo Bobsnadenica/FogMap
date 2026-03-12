@@ -1,3 +1,5 @@
+import 'package:latlong2/latlong.dart';
+
 class SharedCell {
   const SharedCell({
     required this.cellId,
@@ -82,6 +84,7 @@ class SharedLandmark {
     required this.category,
     required this.lat,
     required this.lon,
+    required this.tileId,
     required this.status,
     this.approvedObjectKey,
     this.createdAt,
@@ -93,6 +96,7 @@ class SharedLandmark {
   final String category;
   final double lat;
   final double lon;
+  final String tileId;
   final String status;
   final String? approvedObjectKey;
   final String? createdAt;
@@ -105,6 +109,7 @@ class SharedLandmark {
       category: json['category'] as String? ?? '',
       lat: (json['lat'] as num).toDouble(),
       lon: (json['lon'] as num).toDouble(),
+      tileId: json['tileId'] as String? ?? '',
       status: json['status'] as String? ?? 'UNKNOWN',
       approvedObjectKey: json['approvedObjectKey'] as String?,
       createdAt: json['createdAt'] as String?,
@@ -118,9 +123,52 @@ class SharedLandmark {
         'category': category,
         'lat': lat,
         'lon': lon,
+        'tileId': tileId,
         'status': status,
         'approvedObjectKey': approvedObjectKey,
         'createdAt': createdAt,
+      };
+}
+
+class SharedTileSnapshot {
+  const SharedTileSnapshot({
+    required this.worldId,
+    required this.tileId,
+    required this.generatedAt,
+    required this.cells,
+    required this.landmarks,
+  });
+
+  final String worldId;
+  final String tileId;
+  final String generatedAt;
+  final List<SharedCell> cells;
+  final List<SharedLandmark> landmarks;
+
+  factory SharedTileSnapshot.fromJson(Map<String, dynamic> json) {
+    return SharedTileSnapshot(
+      worldId: json['worldId'] as String? ?? 'global',
+      tileId: json['tileId'] as String? ?? '',
+      generatedAt: json['generatedAt'] as String? ?? '',
+      cells: ((json['cells'] as List?) ?? const [])
+          .map((e) => SharedCell.fromJson(Map<String, dynamic>.from(e as Map)))
+          .toList(growable: false),
+      landmarks: ((json['landmarks'] as List?) ?? const [])
+          .map(
+            (e) => SharedLandmark.fromJson(Map<String, dynamic>.from(e as Map)),
+          )
+          .toList(growable: false),
+    );
+  }
+
+  Map<String, dynamic> toJson() => {
+        'worldId': worldId,
+        'tileId': tileId,
+        'generatedAt': generatedAt,
+        'cells': cells.map((cell) => cell.toJson()).toList(growable: false),
+        'landmarks': landmarks
+            .map((landmark) => landmark.toJson())
+            .toList(growable: false),
       };
 }
 
@@ -132,6 +180,8 @@ class SharedViewportResponse {
     required this.landmarks,
     required this.generatedAt,
     this.hasTilePayload = true,
+    this.tileVersions = const <String, String>{},
+    this.tileSnapshots = const <SharedTileSnapshot>[],
   });
 
   final String worldId;
@@ -140,6 +190,8 @@ class SharedViewportResponse {
   final List<SharedLandmark> landmarks;
   final String generatedAt;
   final bool hasTilePayload;
+  final Map<String, String> tileVersions;
+  final List<SharedTileSnapshot> tileSnapshots;
 
   factory SharedViewportResponse.empty() {
     return const SharedViewportResponse(
@@ -149,6 +201,8 @@ class SharedViewportResponse {
       landmarks: <SharedLandmark>[],
       generatedAt: '',
       hasTilePayload: false,
+      tileVersions: <String, String>{},
+      tileSnapshots: <SharedTileSnapshot>[],
     );
   }
 
@@ -168,10 +222,16 @@ class SharedViewportResponse {
           .toList(),
       generatedAt: json['generatedAt'] as String? ?? '',
       hasTilePayload: true,
+      tileVersions: const <String, String>{},
+      tileSnapshots: const <SharedTileSnapshot>[],
     );
   }
 
-  SharedViewportResponse copyWithMetadata({bool? hasTilePayload}) {
+  SharedViewportResponse copyWithMetadata({
+    bool? hasTilePayload,
+    Map<String, String>? tileVersions,
+    List<SharedTileSnapshot>? tileSnapshots,
+  }) {
     return SharedViewportResponse(
       worldId: worldId,
       cells: cells,
@@ -179,6 +239,8 @@ class SharedViewportResponse {
       landmarks: landmarks,
       generatedAt: generatedAt,
       hasTilePayload: hasTilePayload ?? this.hasTilePayload,
+      tileVersions: tileVersions ?? this.tileVersions,
+      tileSnapshots: tileSnapshots ?? this.tileSnapshots,
     );
   }
 
@@ -191,6 +253,10 @@ class SharedViewportResponse {
             .map((landmark) => landmark.toJson())
             .toList(growable: false),
         'generatedAt': generatedAt,
+        'tileVersions': tileVersions,
+        'tileSnapshots': tileSnapshots
+            .map((snapshot) => snapshot.toJson())
+            .toList(growable: false),
       };
 }
 
@@ -201,6 +267,8 @@ class SharedViewportCacheSnapshot {
     required this.generatedAt,
     required this.cells,
     required this.landmarks,
+    required this.tileVersions,
+    required this.syncedRegionIds,
   });
 
   final String worldId;
@@ -208,6 +276,8 @@ class SharedViewportCacheSnapshot {
   final String generatedAt;
   final List<SharedCell> cells;
   final List<SharedLandmark> landmarks;
+  final Map<String, String> tileVersions;
+  final List<String> syncedRegionIds;
 
   factory SharedViewportCacheSnapshot.empty({String worldId = 'global'}) {
     return SharedViewportCacheSnapshot(
@@ -216,6 +286,8 @@ class SharedViewportCacheSnapshot {
       generatedAt: '',
       cells: const <SharedCell>[],
       landmarks: const <SharedLandmark>[],
+      tileVersions: const <String, String>{},
+      syncedRegionIds: const <String>[],
     );
   }
 
@@ -232,6 +304,12 @@ class SharedViewportCacheSnapshot {
             (e) => SharedLandmark.fromJson(Map<String, dynamic>.from(e as Map)),
           )
           .toList(growable: false),
+      tileVersions:
+          ((json['tileVersions'] as Map?) ?? const <String, dynamic>{})
+              .map((key, value) => MapEntry(key as String, value as String)),
+      syncedRegionIds: ((json['syncedRegionIds'] as List?) ?? const [])
+          .map((regionId) => regionId as String)
+          .toList(growable: false),
     );
   }
 
@@ -243,5 +321,25 @@ class SharedViewportCacheSnapshot {
         'landmarks': landmarks
             .map((landmark) => landmark.toJson())
             .toList(growable: false),
+        'tileVersions': tileVersions,
+        'syncedRegionIds': syncedRegionIds,
       };
+}
+
+enum SharedRegionStatus {
+  available,
+  syncing,
+  synced,
+}
+
+class SharedRegionOutline {
+  const SharedRegionOutline({
+    required this.regionId,
+    required this.points,
+    required this.status,
+  });
+
+  final String regionId;
+  final List<LatLng> points;
+  final SharedRegionStatus status;
 }

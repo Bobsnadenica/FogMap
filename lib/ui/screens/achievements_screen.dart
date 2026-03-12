@@ -242,17 +242,26 @@ class _AchievementTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final tierColor = _tierColor(achievement.tier);
+    const completedColor = Color(0xFF63C27A);
+    final accentColor = achievement.isUnlocked ? completedColor : tierColor;
+    final panelColor = achievement.isUnlocked
+        ? const Color(0x1E173523)
+        : const Color(0x18120E0A);
+    final progressFill = achievement.isUnlocked
+        ? const [Color(0xFF2B8F52), Color(0xFF8BE2A1)]
+        : [tierColor.withValues(alpha: 0.78), tierColor];
+    final progressGlow = achievement.isUnlocked
+        ? const Color(0x4463C27A)
+        : tierColor.withValues(alpha: 0.35);
 
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: achievement.isUnlocked
-            ? const Color(0x2A2D1E0D)
-            : const Color(0x18120E0A),
+        color: panelColor,
         borderRadius: BorderRadius.circular(16),
         border: Border.all(
           color: achievement.isUnlocked
-              ? tierColor.withValues(alpha: 0.55)
+              ? completedColor.withValues(alpha: 0.65)
               : const Color(0x1FD6B36A),
         ),
       ),
@@ -265,7 +274,7 @@ class _AchievementTile extends StatelessWidget {
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 colors: [
-                  tierColor.withValues(alpha: 0.28),
+                  accentColor.withValues(alpha: 0.28),
                   const Color(0xFF15110D),
                 ],
                 begin: Alignment.topLeft,
@@ -275,10 +284,11 @@ class _AchievementTile extends StatelessWidget {
             ),
             child: Icon(
               achievement.isUnlocked
-                  ? Icons.workspace_premium
+                  ? Icons.check_circle_rounded
                   : Icons.lock_outline,
-              color:
-                  achievement.isUnlocked ? tierColor : const Color(0xFF9EA5AC),
+              color: achievement.isUnlocked
+                  ? completedColor
+                  : const Color(0xFF9EA5AC),
             ),
           ),
           const SizedBox(width: 12),
@@ -293,6 +303,9 @@ class _AchievementTile extends StatelessWidget {
                         achievement.title,
                         style: Theme.of(context).textTheme.titleSmall?.copyWith(
                               fontWeight: FontWeight.w800,
+                              color: achievement.isUnlocked
+                                  ? const Color(0xFFDDF5E2)
+                                  : null,
                             ),
                       ),
                     ),
@@ -312,26 +325,47 @@ class _AchievementTile extends StatelessWidget {
                 FantasyProgressBar(
                   value: achievement.progress,
                   height: 10,
-                  fill: [tierColor.withValues(alpha: 0.78), tierColor],
+                  fill: progressFill,
+                  glowColor: progressGlow,
                 ),
                 const SizedBox(height: 8),
                 Row(
                   children: [
                     Text(
-                      '${StatFormatters.wholeNumber(achievement.currentValue)} / ${StatFormatters.wholeNumber(achievement.targetValue)}',
+                      '${StatFormatters.wholeNumber(achievement.displayedCurrentValue)} / ${StatFormatters.wholeNumber(achievement.targetValue)}',
                       style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                            color: const Color(0xFFBCA587),
+                            color: achievement.isUnlocked
+                                ? const Color(0xFFB7E3C1)
+                                : const Color(0xFFBCA587),
                           ),
                     ),
                     const Spacer(),
-                    Text(
-                      achievement.isUnlocked ? 'Unlocked' : 'In progress',
-                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
-                            color: achievement.isUnlocked
-                                ? tierColor
-                                : const Color(0xFFBCA587),
-                            fontWeight: FontWeight.w700,
-                          ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 9,
+                        vertical: 4,
+                      ),
+                      decoration: BoxDecoration(
+                        color: achievement.isUnlocked
+                            ? const Color(0x223E965A)
+                            : const Color(0x221F2428),
+                        borderRadius: BorderRadius.circular(999),
+                        border: Border.all(
+                          color: achievement.isUnlocked
+                              ? completedColor.withValues(alpha: 0.55)
+                              : const Color(0x22BCA587),
+                        ),
+                      ),
+                      child: Text(
+                        achievement.isUnlocked ? 'Completed' : 'In progress',
+                        style:
+                            Theme.of(context).textTheme.labelMedium?.copyWith(
+                                  color: achievement.isUnlocked
+                                      ? completedColor
+                                      : const Color(0xFFBCA587),
+                                  fontWeight: FontWeight.w800,
+                                ),
+                      ),
                     ),
                   ],
                 ),

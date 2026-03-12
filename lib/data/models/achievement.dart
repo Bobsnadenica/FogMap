@@ -25,9 +25,15 @@ class Achievement {
   final AchievementTier tier;
   final bool isUnlocked;
 
+  int get displayedCurrentValue {
+    if (currentValue <= 0) return 0;
+    if (targetValue <= 0) return currentValue;
+    return currentValue > targetValue ? targetValue : currentValue;
+  }
+
   double get progress {
     if (targetValue <= 0) return 1;
-    final ratio = currentValue / targetValue;
+    final ratio = displayedCurrentValue / targetValue;
     if (ratio < 0) return 0;
     if (ratio > 1) return 1;
     return ratio;
