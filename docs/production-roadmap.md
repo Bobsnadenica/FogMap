@@ -73,10 +73,34 @@ Goal:
 
 - stop storing discovery truth as one DynamoDB item per cell forever
 
-Implementation direction:
+Status:
+
+- implemented as the current core write model
+
+Implementation:
 
 1. compact personal discoveries into per-user/per-tile packed data
 2. derive shared read tiles from packed truth
 3. keep S3/CDN as the primary read model
 
-That is the real end-state for long-lived, storage-efficient scale.
+This is the correct durable core for the project at its current stage.
+
+## Phase 6: Dirty-Tile Aggregation Pipeline
+
+Goal:
+
+- move packed tile merge/rebuild pressure out of synchronous request handling
+
+Implemented foundation:
+
+1. synchronous write handlers now enqueue dirty shared tiles
+2. an SQS-backed worker rebuilds shared tile JSON asynchronously
+3. CloudFront-facing tile objects keep a short edge cache while S3 snapshots remain long-lived
+
+Next implementation direction:
+
+1. add queue depth/age monitoring when operations matter
+2. tune worker concurrency for hotspot regions if active usage grows
+3. consider DynamoDB Streams or EventBridge if tile fan-out logic becomes more complex
+
+That is the next backend step after packed atlas storage.

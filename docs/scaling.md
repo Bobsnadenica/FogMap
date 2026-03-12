@@ -32,8 +32,8 @@ The current design now caches shared tile snapshots in private S3:
 
 - `get_shared_viewport` reads tile snapshots from S3 for cells and approved landmarks
 - on cache miss, Lambda rebuilds only the missing tile from DynamoDB
-- `sync_discoveries` invalidates the affected shared tile snapshot when new cells are discovered
-- `moderate_landmark` invalidates the affected shared tile snapshot when landmark visibility changes
+- `sync_discoveries` enqueues affected shared tiles for asynchronous rebuild when new cells are discovered
+- `moderate_landmark` enqueues affected shared tiles for asynchronous rebuild when landmark visibility changes
 - live player presence is still read directly from DynamoDB, because presence must remain fresh and should disappear quickly when the app closes
 
 This changes the read path from:
@@ -62,43 +62,46 @@ This improves perceived speed without turning the phone into source-of-truth.
 
 ## Cache lifetime strategy
 
-Tile/bootstrap snapshots are invalidation-driven:
+Tile/bootstrap snapshots are not rebuilt on a timer:
 
-- `sync_discoveries` deletes affected shared-tile and user-bootstrap cache objects when truth changes
-- `moderate_landmark` deletes affected shared-tile cache objects when approval state changes
+- personal bootstrap snapshots are invalidated when a user writes new discovery truth
+- shared tiles are rebuilt asynchronously when truth changes
+- shared tile objects keep a long internal S3 validity window, but a short edge cache window so CloudFront refreshes quickly
 
-That means cache TTL should be long, not short. Short TTL only forces unnecessary DynamoDB rebuilds for unchanged map data.
+That means S3 object validity TTL should be long, not short. Short validity TTL only forces unnecessary DynamoDB rebuilds for unchanged map data.
 
 The current default should therefore be:
 
 - long shared-tile snapshot TTL
+- short shared-tile edge cache TTL
 - long user-bootstrap snapshot TTL
 - longer S3 retention for discovery-cache objects
 
-Freshness still comes from invalidation, while S3 absorbs repeated reads cheaply.
+Freshness comes from queue-driven rebuilds and short edge caching, while S3 absorbs repeated reads cheaply.
 
 ## Current write-model limit
 
 The current read model is in good shape for `10,000` users.
 
-The current write model is still not the final planet-scale design for years of heavy play, because:
+The current write model now stores packed atlas tiles instead of one DynamoDB item per cell:
 
-- personal discoveries are stored as one DynamoDB item per discovered cell
-- shared discoveries are stored as one DynamoDB item per shared cell
+- personal discoveries are stored as one DynamoDB item per packed tile
+- shared discoveries are stored as one DynamoDB item per packed tile
 
-That is operationally simple and safe, but long-term storage will grow linearly with discovered cells.
+That is a major improvement in storage efficiency and write amplification.
 
-The next major backend step, when discovery history gets large enough to matter, is:
+The next long-term backend step, when discovery history and concurrency get large enough to matter, is:
 
-1. compact personal discoveries into per-user/per-tile bitsets or another packed tile format
-2. compact shared discoveries into tile snapshots derived from those packed writes
+1. keep packed tile truth writes small and synchronous
+2. scale the dirty-tile pipeline further with higher worker parallelism or a stream-driven aggregator
 3. keep S3/CloudFront as the main read path for shared-map tiles
+4. optionally move personal packed tile blobs to S3 with DynamoDB metadata if item-size or hot-tile limits start to matter
 
 ## What I would do next for larger scale
 
 If shared concurrency gets materially higher, the next step is:
 
-1. serve shared tile snapshots directly via CloudFront instead of always routing through AppSync
+1. make CloudFront tile delivery the only shared-tile read path and retire the legacy viewport fallback
 2. split shared-tile reads from live presence, keeping AppSync/Lambda only for auth-sensitive operations and live presence
 3. optionally move the shared spatial index from the current fixed cell grid to H3 if you need better multi-resolution aggregation
 

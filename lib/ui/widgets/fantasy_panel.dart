@@ -1,3 +1,5 @@
+import 'dart:ui';
+
 import 'package:flutter/material.dart';
 
 class FantasyPanel extends StatelessWidget {
@@ -5,11 +7,11 @@ class FantasyPanel extends StatelessWidget {
     super.key,
     required this.child,
     this.padding = const EdgeInsets.all(16),
-    this.accentColor = const Color(0xFFD6B36A),
+    this.accentColor = const Color(0xFFD4B16B),
     this.background = const [
-      Color(0xEE1B1610),
-      Color(0xEE241C14),
-      Color(0xEE151A20),
+      Color(0xCC161915),
+      Color(0xCC1C211B),
+      Color(0xCC14181A),
     ],
   });
 
@@ -20,32 +22,45 @@ class FantasyPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: background,
-        ),
-        borderRadius: BorderRadius.circular(22),
-        border: Border.all(color: accentColor.withValues(alpha: 0.4)),
-        boxShadow: const [
-          BoxShadow(
-            color: Color(0x66000000),
-            blurRadius: 18,
-            offset: Offset(0, 10),
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(24),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+        child: Container(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: background,
+            ),
+            borderRadius: BorderRadius.circular(24),
+            border: Border.all(color: accentColor.withValues(alpha: 0.34)),
+            boxShadow: const [
+              BoxShadow(
+                color: Color(0x33000000),
+                blurRadius: 24,
+                offset: Offset(0, 14),
+              ),
+            ],
           ),
-        ],
-      ),
-      child: Container(
-        margin: const EdgeInsets.all(2),
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: const Color(0x1FFFFFFF)),
-        ),
-        child: Padding(
-          padding: padding,
-          child: child,
+          child: Container(
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(24),
+              gradient: const LinearGradient(
+                begin: Alignment.topCenter,
+                end: Alignment.bottomCenter,
+                colors: [
+                  Color(0x18FFF7E4),
+                  Color(0x08FFF7E4),
+                  Color(0x00000000),
+                ],
+              ),
+            ),
+            child: Padding(
+              padding: padding,
+              child: child,
+            ),
+          ),
         ),
       ),
     );
@@ -57,8 +72,8 @@ class FantasyProgressBar extends StatelessWidget {
     super.key,
     required this.value,
     this.height = 10,
-    this.fill = const [Color(0xFFB87924), Color(0xFFE8C26B)],
-    this.trackColor = const Color(0x5524130A),
+    this.fill = const [Color(0xFFC89B57), Color(0xFFF0D7A2)],
+    this.trackColor = const Color(0x55201C14),
   });
 
   final double value;
@@ -89,6 +104,12 @@ class FantasyProgressBar extends StatelessWidget {
                 decoration: BoxDecoration(
                   gradient: LinearGradient(colors: fill),
                   borderRadius: BorderRadius.circular(height),
+                  boxShadow: const [
+                    BoxShadow(
+                      color: Color(0x44E5C37C),
+                      blurRadius: 8,
+                    ),
+                  ],
                 ),
               ),
             ),

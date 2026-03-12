@@ -1,8 +1,8 @@
-# Mist of Atlas
+# World of Fog: Realmwalker
 
-`FogMap` is the repository name. The product/app is `WMist of Atlas`.
+`FogMap` is the repository name. The product/app is `World of Fog: Realmwalker`.
 
-Mist of Atlas is a local-first exploration app with an optional shared realm.
+World of Fog: Realmwalker is a local-first exploration app with an optional shared realm.
 
 The product has two distinct responsibilities:
 
@@ -263,40 +263,56 @@ CloudFront currently serves:
 
 Purpose:
 
-- personal cloud source of truth for discovered cells
+- personal cloud source of truth for packed atlas tiles
 
 Key shape:
 
 - `pk = USER#<userId>`
-- `sk = CELL#<cellId>`
+- `sk = TILE#<tileId>`
 
 Stored attributes include:
 
 - `worldId`
-- `cellId`
-- `lat`
-- `lon`
 - `tileId`
-- `discoveredAt`
+- `cellBitmap`
+- `bitmapVersion`
+- `discoveredCellCount`
+- `updatedAt`
+- `version`
+- `storageKind`
+- `cellDegrees`
+
+Notes:
+
+- one packed item contains many discovered cells for a tile
+- legacy `CELL#...` items can still be read during transition
 
 ### `shared_cells`
 
 Purpose:
 
-- cloud source of truth for shared discovery coverage
+- cloud source of truth for packed shared atlas tiles
 
 Key shape:
 
 - `pk = WORLD#<worldId>#TILE#<tileId>`
-- `sk = CELL#<cellId>`
+- `sk = META#PACKED`
 
 Stored attributes include:
 
-- `lat`
-- `lon`
-- `discovererCount`
-- `firstDiscoveredAt`
-- `lastDiscoveredAt`
+- `tileId`
+- `cellBitmap`
+- `bitmapVersion`
+- `discoveredCellCount`
+- `updatedAt`
+- `version`
+- `storageKind`
+- `cellDegrees`
+
+Notes:
+
+- the shared read model is still served as tile JSON snapshots through S3/CloudFront
+- legacy `CELL#...` items can still be read during transition
 
 ### `player_presence`
 
@@ -418,7 +434,7 @@ Responsibilities:
 - update shared coverage in `shared_cells`
 - update live player presence in `player_presence`
 - invalidate personal bootstrap cache
-- rebuild affected shared tile snapshots immediately after write
+- enqueue dirty shared tiles for asynchronous rebuild
 
 This is the main write path of the application.
 
@@ -491,7 +507,7 @@ Responsibilities:
 - copy approved media into the approved bucket
 - delete the pending object
 - update moderation status in DynamoDB
-- rebuild the affected shared tile snapshot
+- enqueue the affected shared tile for asynchronous rebuild
 
 ### `get_landmark_view_url`
 
@@ -507,7 +523,9 @@ Responsibilities:
 - `config.py`: environment-driven config
 - `geo.py`: shared tile math and bounds helpers
 - `discovery_cache.py`: S3-backed JSON cache helpers
-- `shared_tiles.py`: shared tile snapshot builder used by multiple lambdas
+- `atlas_tiles.py`: packed tile encoding/merge helpers for personal/shared truth
+- `shared_tiles.py`: shared tile snapshot builder and cache writer used by multiple lambdas
+- `tile_rebuild_queue.py`: dirty-tile queue publisher used by synchronous write handlers
 
 ## End-To-End Runtime Flows
 
@@ -528,7 +546,7 @@ Responsibilities:
 3. accepted point updates local reveal history and discovered cells
 4. local profile JSON is saved
 5. cloud sync timer batches pending cells
-6. `syncDiscoveries` writes truth and refreshes affected caches
+6. `syncDiscoveries` writes packed truth, invalidates personal bootstrap cache, and enqueues dirty shared tiles
 
 ### 3. Shared map read path
 
@@ -558,7 +576,7 @@ This gives a safe migration path:
 5. moderator reviews pending submissions
 6. `moderateLandmark` approves or rejects
 7. approved media becomes available through CloudFront
-8. shared tile snapshot is rebuilt so the map sees the change
+8. the affected shared tile is enqueued and rebuilt asynchronously
 
 ## Scaling Model
 
@@ -579,7 +597,7 @@ The key economic idea is:
 - DynamoDB is used for writes and truth
 - S3 absorbs repeated shared/bootstrap reads
 - CloudFront absorbs repeated shared tile delivery
-- AppSync/Lambda is kept for mutations, auth-sensitive operations, and live presence
+- AppSync/Lambda is kept for mutations, auth-sensitive operations, live presence, and dirty-tile rebuild workers
 
 ### Why this is cost-effective
 
@@ -595,7 +613,7 @@ to:
 
 - mostly cached/shared tile delivery
 - small live presence queries
-- infrequent rebuilds only when truth changes
+- asynchronous tile rebuilds only when truth changes
 
 ### Current scale limit
 
@@ -603,12 +621,15 @@ The major remaining long-term limitation is the write model.
 
 Today:
 
-- personal discovery truth is one DynamoDB item per discovered cell
-- shared discovery truth is one DynamoDB item per shared cell
+- personal discovery truth is one DynamoDB item per packed tile
+- shared discovery truth is one DynamoDB item per packed tile
 
-This is simple and reliable, but it grows linearly forever.
+This is materially better than one-item-per-cell storage, but it still leaves two long-term limits:
 
-That means the current backend is good for the current stage and a real user base, but it is not yet the final planet-scale or years-of-history storage model.
+- very hot tiles can see optimistic-lock retries under heavy concurrent writes
+- tile-level read/merge/write work is still done synchronously in the write path
+
+That means the current backend is in a much better place for a real user base, but it is still not yet the final planet-scale or years-of-history storage model.
 
 ## Security Model
 

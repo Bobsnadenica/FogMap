@@ -6,6 +6,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:latlong2/latlong.dart';
 
 import '../cloud/auth/cognito_auth_service.dart';
+import '../cloud/auth/sign_in_flow.dart';
 import '../cloud/backend_config.dart';
 import '../cloud/map_mode.dart';
 import '../cloud/models/landmark_models.dart';
@@ -102,6 +103,8 @@ class AppController extends ChangeNotifier {
   bool get isSignedIn => authService.isSignedIn;
   bool get isAdminOrModerator =>
       authService.currentSession?.isAdminOrModerator ?? false;
+  PendingNewPasswordChallenge? get pendingNewPasswordChallenge =>
+      authService.pendingNewPasswordChallenge;
   bool get canChangeDisplayName =>
       !isSignedIn || !authService.isDisplayNameLocked;
   bool get canChangeProfileIcon =>
@@ -254,11 +257,41 @@ class AppController extends ChangeNotifier {
     await authService.confirmSignUp(email: email, code: code);
   }
 
-  Future<void> signIn({
+  Future<SignInOutcome> signIn({
     required String email,
     required String password,
   }) async {
-    await authService.signIn(email: email, password: password);
+    final outcome = await authService.signIn(email: email, password: password);
+    if (outcome == SignInOutcome.newPasswordRequired) {
+      notifyListeners();
+      return outcome;
+    }
+
+    await _completeSignedInTransition();
+    notifyListeners();
+    return outcome;
+  }
+
+  Future<void> completeNewPasswordChallenge({
+    required String newPassword,
+    required String displayName,
+    required String profileIcon,
+  }) async {
+    await authService.completeNewPasswordChallenge(
+      newPassword: newPassword,
+      displayName: displayName,
+      profileIcon: profileIcon,
+    );
+    await _completeSignedInTransition();
+    notifyListeners();
+  }
+
+  void cancelPendingSignInChallenge() {
+    authService.clearPendingSignInChallenge();
+    notifyListeners();
+  }
+
+  Future<void> _completeSignedInTransition() async {
     _resetSessionScopedState();
     await _switchToCurrentSessionProfile();
     await _loadPersistedSharedCache();
@@ -266,7 +299,6 @@ class AppController extends ChangeNotifier {
     await _bootstrapCurrentLocation();
     _scheduleCloudSync();
     _ensureSharedViewportPolling();
-    notifyListeners();
   }
 
   Future<void> signOut() async {

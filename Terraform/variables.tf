@@ -53,6 +53,16 @@ variable "shared_tile_cache_ttl_seconds" {
   }
 }
 
+variable "shared_tile_edge_cache_seconds" {
+  type    = number
+  default = 30
+
+  validation {
+    condition     = var.shared_tile_edge_cache_seconds >= 5
+    error_message = "shared_tile_edge_cache_seconds must be at least 5 seconds."
+  }
+}
+
 variable "user_bootstrap_cache_ttl_seconds" {
   type    = number
   default = 2592000

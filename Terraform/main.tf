@@ -686,6 +686,29 @@ resource "aws_s3_bucket_policy" "discovery_cache" {
   })
 }
 
+resource "aws_sqs_queue" "shared_tile_rebuild_dlq" {
+  name                      = "${local.name_prefix}-shared-tile-rebuild-dlq"
+  message_retention_seconds = 1209600
+  sqs_managed_sse_enabled   = true
+
+  tags = local.tags
+}
+
+resource "aws_sqs_queue" "shared_tile_rebuild" {
+  name                       = "${local.name_prefix}-shared-tile-rebuild"
+  visibility_timeout_seconds = 90
+  message_retention_seconds  = 345600
+  receive_wait_time_seconds  = 10
+  sqs_managed_sse_enabled    = true
+
+  redrive_policy = jsonencode({
+    deadLetterTargetArn = aws_sqs_queue.shared_tile_rebuild_dlq.arn
+    maxReceiveCount     = 5
+  })
+
+  tags = local.tags
+}
+
 # IAM
 resource "aws_iam_role" "lambda_exec" {
   name = "${local.name_prefix}-lambda-exec"
@@ -736,6 +759,14 @@ resource "aws_iam_policy" "lambda_app" {
       {
         Effect = "Allow"
         Action = [
+          "sqs:SendMessage",
+          "sqs:SendMessageBatch"
+        ]
+        Resource = aws_sqs_queue.shared_tile_rebuild.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
           "s3:GetObject",
           "s3:PutObject",
           "s3:DeleteObject",
@@ -746,6 +777,21 @@ resource "aws_iam_policy" "lambda_app" {
           "${aws_s3_bucket.approved_landmarks.arn}/*",
           "${aws_s3_bucket.discovery_cache.arn}/*"
         ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket"
+        ]
+        Resource = aws_s3_bucket.discovery_cache.arn
+        Condition = {
+          StringLike = {
+            "s3:prefix" = [
+              "${local.shared_tile_cache_prefix}/*",
+              "user-bootstrap/v1/*"
+            ]
+          }
+        }
       }
     ]
   })
@@ -798,6 +844,8 @@ locals {
     PRESENCE_TTL_SECONDS             = tostring(var.presence_ttl_seconds)
     SHARED_TILE_CACHE_PREFIX         = local.shared_tile_cache_prefix
     SHARED_TILE_CACHE_TTL_SECONDS    = tostring(var.shared_tile_cache_ttl_seconds)
+    SHARED_TILE_EDGE_CACHE_SECONDS   = tostring(var.shared_tile_edge_cache_seconds)
+    SHARED_TILE_REBUILD_QUEUE_URL    = aws_sqs_queue.shared_tile_rebuild.id
     USER_BOOTSTRAP_CACHE_PREFIX      = "user-bootstrap/v1"
     USER_BOOTSTRAP_CACHE_TTL_SECONDS = tostring(var.user_bootstrap_cache_ttl_seconds)
     UPLOAD_EXPIRATION_SECONDS        = tostring(var.presigned_upload_expiration_seconds)
@@ -987,6 +1035,32 @@ resource "aws_lambda_function" "get_my_discovery_bootstrap" {
   }
 
   tags = local.tags
+}
+
+resource "aws_lambda_function" "rebuild_shared_tiles" {
+  function_name    = "${local.name_prefix}-rebuild-shared-tiles"
+  role             = aws_iam_role.lambda_exec.arn
+  runtime          = "python3.12"
+  handler          = "rebuild_shared_tiles.index.handler"
+  architectures    = ["arm64"]
+  filename         = data.archive_file.lambda_bundle.output_path
+  source_code_hash = data.archive_file.lambda_bundle.output_base64sha256
+  timeout          = 30
+  memory_size      = 256
+
+  environment {
+    variables = local.lambda_env
+  }
+
+  tags = local.tags
+}
+
+resource "aws_lambda_event_source_mapping" "rebuild_shared_tiles" {
+  event_source_arn                   = aws_sqs_queue.shared_tile_rebuild.arn
+  function_name                      = aws_lambda_function.rebuild_shared_tiles.arn
+  batch_size                         = 10
+  maximum_batching_window_in_seconds = 2
+  enabled                            = true
 }
 
 resource "aws_iam_role_policy" "appsync_lambda" {

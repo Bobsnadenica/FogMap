@@ -22,7 +22,8 @@ def _prune_memory_cache(now_epoch):
     expired = [
         key
         for key, entry in MEMORY_CACHE.items()
-        if int(entry.get("expiresAtEpoch", 0)) <= now_epoch
+        if int(entry.get("memoryExpiresAtEpoch", entry.get("expiresAtEpoch", 0)))
+        <= now_epoch
     ]
     for key in expired:
         MEMORY_CACHE.pop(key, None)
@@ -30,17 +31,24 @@ def _prune_memory_cache(now_epoch):
     while len(MEMORY_CACHE) > MEMORY_CACHE_MAX_ENTRIES:
         oldest_key = min(
             MEMORY_CACHE,
-            key=lambda key: int(MEMORY_CACHE[key].get("expiresAtEpoch", 0)),
+            key=lambda key: int(
+                MEMORY_CACHE[key].get(
+                    "memoryExpiresAtEpoch",
+                    MEMORY_CACHE[key].get("expiresAtEpoch", 0),
+                )
+            ),
         )
         MEMORY_CACHE.pop(oldest_key, None)
 
 
-def load_cached_json(object_key, now_epoch=None):
+def load_cached_json(object_key, now_epoch=None, memory_cache_ttl_seconds=None):
     now_epoch = int(now_epoch or time())
     _prune_memory_cache(now_epoch)
 
     cached = MEMORY_CACHE.get(object_key)
-    if cached and int(cached.get("expiresAtEpoch", 0)) > now_epoch:
+    if cached and int(
+        cached.get("memoryExpiresAtEpoch", cached.get("expiresAtEpoch", 0))
+    ) > now_epoch:
         return cached["payload"]
 
     try:
@@ -57,17 +65,35 @@ def load_cached_json(object_key, now_epoch=None):
         MEMORY_CACHE.pop(object_key, None)
         return None
 
+    memory_expires_at_epoch = expires_at_epoch
+    if memory_cache_ttl_seconds is not None:
+        memory_expires_at_epoch = min(
+            expires_at_epoch,
+            now_epoch + max(1, int(memory_cache_ttl_seconds)),
+        )
+
     MEMORY_CACHE[object_key] = {
         "expiresAtEpoch": expires_at_epoch,
+        "memoryExpiresAtEpoch": memory_expires_at_epoch,
         "payload": payload,
     }
     _prune_memory_cache(now_epoch)
     return payload
 
 
-def store_cached_json(object_key, payload, ttl_seconds):
+def store_cached_json(
+    object_key,
+    payload,
+    ttl_seconds,
+    cache_control_seconds=None,
+    memory_cache_ttl_seconds=None,
+):
     now_epoch = int(time())
     ttl_seconds = max(1, int(ttl_seconds))
+    cache_control_seconds = max(
+        1,
+        int(cache_control_seconds if cache_control_seconds is not None else ttl_seconds),
+    )
     cached_payload = dict(payload)
     cached_payload["generatedAt"] = cached_payload.get("generatedAt") or utc_now_iso()
     cached_payload["expiresAtEpoch"] = now_epoch + ttl_seconds
@@ -81,22 +107,45 @@ def store_cached_json(object_key, payload, ttl_seconds):
             separators=(",", ":"),
         ).encode("utf-8"),
         ContentType="application/json",
-        CacheControl=f"max-age={ttl_seconds}",
+        CacheControl=f"max-age={cache_control_seconds}",
     )
+
+    memory_expires_at_epoch = cached_payload["expiresAtEpoch"]
+    if memory_cache_ttl_seconds is not None:
+        memory_expires_at_epoch = min(
+            cached_payload["expiresAtEpoch"],
+            now_epoch + max(1, int(memory_cache_ttl_seconds)),
+        )
 
     MEMORY_CACHE[object_key] = {
         "expiresAtEpoch": cached_payload["expiresAtEpoch"],
+        "memoryExpiresAtEpoch": memory_expires_at_epoch,
         "payload": cached_payload,
     }
     _prune_memory_cache(now_epoch)
     return cached_payload
 
 
-def get_or_build_cached_json(object_key, ttl_seconds, builder):
-    payload = load_cached_json(object_key)
+def get_or_build_cached_json(
+    object_key,
+    ttl_seconds,
+    builder,
+    cache_control_seconds=None,
+    memory_cache_ttl_seconds=None,
+):
+    payload = load_cached_json(
+        object_key,
+        memory_cache_ttl_seconds=memory_cache_ttl_seconds,
+    )
     if payload is not None:
         return payload
-    return store_cached_json(object_key, builder(), ttl_seconds)
+    return store_cached_json(
+        object_key,
+        builder(),
+        ttl_seconds,
+        cache_control_seconds=cache_control_seconds,
+        memory_cache_ttl_seconds=memory_cache_ttl_seconds,
+    )
 
 
 def invalidate_cached_json_keys(object_keys):

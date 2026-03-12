@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 
+import '../../cloud/auth/sign_in_flow.dart';
 import '../../cloud/models/landmark_models.dart';
 import '../../controllers/app_controller.dart';
 import '../../core/utils/journey_insights.dart';
@@ -20,6 +21,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
   final _nameController = TextEditingController();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
+  final _newPasswordController = TextEditingController();
+  final _confirmNewPasswordController = TextEditingController();
   final _confirmEmailController = TextEditingController();
   final _confirmCodeController = TextEditingController();
   final _nameFocusNode = FocusNode();
@@ -28,6 +31,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
   String? _boundProfileId;
   String? _boundSessionEmail;
   bool? _boundSignedIn;
+  String? _boundPendingChallengeEmail;
 
   @override
   void initState() {
@@ -41,6 +45,8 @@ class _ProfileScreenState extends State<ProfileScreen> {
     _nameController.dispose();
     _emailController.dispose();
     _passwordController.dispose();
+    _newPasswordController.dispose();
+    _confirmNewPasswordController.dispose();
     _confirmEmailController.dispose();
     _confirmCodeController.dispose();
     super.dispose();
@@ -487,6 +493,86 @@ class _ProfileScreenState extends State<ProfileScreen> {
       );
     }
 
+    final pendingChallenge = controller.pendingNewPasswordChallenge;
+    if (pendingChallenge != null) {
+      return FantasyPanel(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const _SectionHeader(
+              title: 'Set Permanent Password',
+              subtitle:
+                  'This account was created by an administrator and must set a permanent password before it can sign in.',
+            ),
+            const SizedBox(height: 12),
+            _DetailRow(
+              label: 'Account',
+              value: pendingChallenge.email,
+            ),
+            if (pendingChallenge.requiredAttributes.isNotEmpty) ...[
+              _DetailRow(
+                label: 'Required attributes',
+                value: pendingChallenge.requiredAttributes.join(', '),
+              ),
+              const SizedBox(height: 8),
+            ],
+            TextField(
+              controller: _newPasswordController,
+              obscureText: true,
+              textInputAction: TextInputAction.next,
+              autocorrect: false,
+              enableSuggestions: false,
+              decoration: const InputDecoration(
+                labelText: 'New permanent password',
+              ),
+            ),
+            const SizedBox(height: 10),
+            TextField(
+              controller: _confirmNewPasswordController,
+              obscureText: true,
+              textInputAction: TextInputAction.done,
+              autocorrect: false,
+              enableSuggestions: false,
+              decoration: const InputDecoration(
+                labelText: 'Confirm permanent password',
+              ),
+            ),
+            const SizedBox(height: 10),
+            if (pendingChallenge.requiresDisplayName)
+              Text(
+                'This account also requires a display name. The current identity value will be used.',
+                style: Theme.of(context).textTheme.bodySmall,
+              ),
+            if (pendingChallenge.requiresProfileIcon)
+              Padding(
+                padding: const EdgeInsets.only(top: 6),
+                child: Text(
+                  'This account also requires a profile icon. The selected icon above will be used.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
+            const SizedBox(height: 14),
+            Row(
+              children: [
+                Expanded(
+                  child: FilledButton(
+                    onPressed: () =>
+                        _handleCompleteNewPasswordChallenge(controller),
+                    child: const Text('Set password and sign in'),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                OutlinedButton(
+                  onPressed: controller.cancelPendingSignInChallenge,
+                  child: const Text('Cancel'),
+                ),
+              ],
+            ),
+          ],
+        ),
+      );
+    }
+
     return FantasyPanel(
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -530,13 +616,7 @@ class _ProfileScreenState extends State<ProfileScreen> {
             children: [
               Expanded(
                 child: FilledButton(
-                  onPressed: () => _runAction(
-                    () => widget.controller.signIn(
-                      email: _emailController.text,
-                      password: _passwordController.text,
-                    ),
-                    successMessage: 'Signed in successfully.',
-                  ),
+                  onPressed: _handleSignIn,
                   child: const Text('Sign in'),
                 ),
               ),
@@ -712,16 +792,20 @@ class _ProfileScreenState extends State<ProfileScreen> {
     final profileId = widget.controller.profile.id;
     final sessionEmail = widget.controller.signedInEmail;
     final signedIn = widget.controller.isSignedIn;
+    final pendingChallengeEmail =
+        widget.controller.pendingNewPasswordChallenge?.email;
     final changed = force ||
         _boundProfileId != profileId ||
         _boundSessionEmail != sessionEmail ||
-        _boundSignedIn != signedIn;
+        _boundSignedIn != signedIn ||
+        _boundPendingChallengeEmail != pendingChallengeEmail;
 
     if (!changed) return;
 
     _boundProfileId = profileId;
     _boundSessionEmail = sessionEmail;
     _boundSignedIn = signedIn;
+    _boundPendingChallengeEmail = pendingChallengeEmail;
     _profileIconDirty = false;
 
     final displayName = widget.controller.profile.displayName;
@@ -734,6 +818,60 @@ class _ProfileScreenState extends State<ProfileScreen> {
     if (signedIn) {
       _passwordController.clear();
       _confirmCodeController.clear();
+    }
+    _newPasswordController.clear();
+    _confirmNewPasswordController.clear();
+  }
+
+  Future<void> _handleSignIn() async {
+    try {
+      final outcome = await widget.controller.signIn(
+        email: _emailController.text,
+        password: _passwordController.text,
+      );
+      if (!mounted) return;
+      switch (outcome) {
+        case SignInOutcome.signedIn:
+          _showSnackBar('Signed in successfully.');
+          break;
+        case SignInOutcome.newPasswordRequired:
+          _showSnackBar(
+            'A permanent password is required for this account. Set it below to continue.',
+          );
+          break;
+      }
+    } catch (e) {
+      if (!mounted) return;
+      _showSnackBar(e.toString());
+    }
+  }
+
+  Future<void> _handleCompleteNewPasswordChallenge(
+    AppController controller,
+  ) async {
+    final newPassword = _newPasswordController.text;
+    final confirmPassword = _confirmNewPasswordController.text;
+
+    if (newPassword.isEmpty) {
+      _showSnackBar('Please enter a new permanent password.');
+      return;
+    }
+    if (newPassword != confirmPassword) {
+      _showSnackBar('The new password and confirmation do not match.');
+      return;
+    }
+
+    try {
+      await controller.completeNewPasswordChallenge(
+        newPassword: newPassword,
+        displayName: _nameController.text,
+        profileIcon: _selectedProfileIcon ?? controller.profile.profileIcon,
+      );
+      if (!mounted) return;
+      _showSnackBar('Password updated and account signed in.');
+    } catch (e) {
+      if (!mounted) return;
+      _showSnackBar(e.toString());
     }
   }
 

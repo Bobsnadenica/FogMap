@@ -14,58 +14,36 @@ class MapModeToggle extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final compact = constraints.maxWidth < 220;
-
-        return DecoratedBox(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(16),
-            border: Border.all(color: const Color(0x66D8B979)),
-            gradient: const LinearGradient(
-              begin: Alignment.topCenter,
-              end: Alignment.bottomCenter,
-              colors: [
-                Color(0xFF20150E),
-                Color(0xFF120D0A),
-              ],
-            ),
-            boxShadow: const [
-              BoxShadow(
-                color: Color(0x55000000),
-                blurRadius: 14,
-                offset: Offset(0, 6),
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(20),
+        color: const Color(0x55101314),
+        border: Border.all(color: const Color(0x2FD4B16B)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(4),
+        child: Row(
+          children: [
+            Expanded(
+              child: _ModeButton(
+                label: 'Personal',
+                icon: Icons.person_pin_circle_outlined,
+                selected: mode == MapMode.personal,
+                onTap: () => onChanged(MapMode.personal),
               ),
-            ],
-          ),
-          child: Padding(
-            padding: const EdgeInsets.all(4),
-            child: Row(
-              children: [
-                Expanded(
-                  child: _ModeButton(
-                    label: 'Personal',
-                    icon: Icons.person_rounded,
-                    selected: mode == MapMode.personal,
-                    compact: compact,
-                    onTap: () => onChanged(MapMode.personal),
-                  ),
-                ),
-                const SizedBox(width: 6),
-                Expanded(
-                  child: _ModeButton(
-                    label: 'Shared',
-                    icon: Icons.public_rounded,
-                    selected: mode == MapMode.shared,
-                    compact: compact,
-                    onTap: () => onChanged(MapMode.shared),
-                  ),
-                ),
-              ],
             ),
-          ),
-        );
-      },
+            const SizedBox(width: 6),
+            Expanded(
+              child: _ModeButton(
+                label: 'Shared',
+                icon: Icons.public_outlined,
+                selected: mode == MapMode.shared,
+                onTap: () => onChanged(MapMode.shared),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -75,110 +53,84 @@ class _ModeButton extends StatelessWidget {
     required this.label,
     required this.icon,
     required this.selected,
-    required this.compact,
     required this.onTap,
   });
 
   final String label;
   final IconData icon;
   final bool selected;
-  final bool compact;
   final VoidCallback onTap;
 
   @override
   Widget build(BuildContext context) {
-    final foregroundColor =
-        selected ? const Color(0xFF1A1108) : const Color(0xFFE1C995);
+    final foreground =
+        selected ? const Color(0xFF17140F) : const Color(0xFFF1E7D3);
 
     return Material(
       color: Colors.transparent,
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
+        borderRadius: BorderRadius.circular(16),
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 180),
           curve: Curves.easeOut,
-          constraints: const BoxConstraints(minHeight: 56),
-          padding: EdgeInsets.symmetric(
-            horizontal: compact ? 8 : 12,
-            vertical: compact ? 8 : 10,
-          ),
+          constraints: const BoxConstraints(minHeight: 54),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
           decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color:
-                  selected ? const Color(0xFFE6C783) : const Color(0x33C7A05A),
-            ),
+            borderRadius: BorderRadius.circular(16),
             gradient: selected
                 ? const LinearGradient(
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
                     colors: [
-                      Color(0xFFF5D79A),
-                      Color(0xFFD0A24F),
+                      Color(0xFFF4DFB1),
+                      Color(0xFFD0A767),
                     ],
                   )
                 : const LinearGradient(
                     begin: Alignment.topCenter,
                     end: Alignment.bottomCenter,
                     colors: [
-                      Color(0xFF2B1D13),
-                      Color(0xFF17100B),
+                      Color(0x99202620),
+                      Color(0x9920292E),
                     ],
                   ),
+            border: Border.all(
+              color: selected
+                  ? const Color(0x66FFE7B0)
+                  : const Color(0x22FFF4E0),
+            ),
             boxShadow: selected
                 ? const [
                     BoxShadow(
-                      color: Color(0x44E6C783),
+                      color: Color(0x33D0A767),
                       blurRadius: 10,
                       offset: Offset(0, 4),
                     ),
                   ]
                 : null,
           ),
-          child: compact
-              ? Column(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(icon, size: 18, color: foregroundColor),
-                    const SizedBox(height: 4),
-                    FittedBox(
-                      fit: BoxFit.scaleDown,
-                      child: Text(
-                        label,
-                        maxLines: 1,
-                        style:
-                            Theme.of(context).textTheme.labelMedium?.copyWith(
-                                  color: foregroundColor,
-                                  fontWeight: FontWeight.w700,
-                                  letterSpacing: 0.5,
-                                ),
-                      ),
-                    ),
-                  ],
-                )
-              : Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    Icon(icon, size: 18, color: foregroundColor),
-                    const SizedBox(width: 8),
-                    Flexible(
-                      child: FittedBox(
-                        fit: BoxFit.scaleDown,
-                        child: Text(
-                          label,
-                          maxLines: 1,
-                          style:
-                              Theme.of(context).textTheme.labelLarge?.copyWith(
-                                    color: foregroundColor,
-                                    fontWeight: FontWeight.w700,
-                                    letterSpacing: 0.6,
-                                  ),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Icon(icon, size: 18, color: foreground),
+              const SizedBox(width: 8),
+              Flexible(
+                child: FittedBox(
+                  fit: BoxFit.scaleDown,
+                  child: Text(
+                    label,
+                    maxLines: 1,
+                    style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                          color: foreground,
+                          fontWeight: FontWeight.w800,
+                          letterSpacing: 0.3,
                         ),
-                      ),
-                    ),
-                  ],
+                  ),
                 ),
+              ),
+            ],
+          ),
         ),
       ),
     );

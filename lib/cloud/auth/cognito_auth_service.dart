@@ -6,6 +6,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import '../../core/constants/profile_icon_catalog.dart';
 import '../backend_config.dart';
 import 'auth_session.dart';
+import 'sign_in_flow.dart';
 
 class CognitoAuthService {
   CognitoAuthService()
@@ -47,10 +48,14 @@ class CognitoAuthService {
   bool _displayNameLockedOverride = false;
   String? _profileIconOverride;
   bool _profileIconLockedOverride = false;
+  CognitoUser? _pendingChallengeUser;
+  PendingNewPasswordChallenge? _pendingNewPasswordChallenge;
 
   AuthSession? get currentSession => _currentSession;
+  PendingNewPasswordChallenge? get pendingNewPasswordChallenge =>
+      _pendingNewPasswordChallenge;
 
-  bool get isSignedIn => _currentSession != null && !_currentSession!.isExpired;
+  bool get isSignedIn => _currentSession != null;
 
   Future<void> init() async {
     final email = await _storage.read(key: _emailKey);
@@ -79,6 +84,7 @@ class CognitoAuthService {
       _displayNameLockedOverride = false;
       _profileIconOverride = null;
       _profileIconLockedOverride = false;
+      clearPendingSignInChallenge();
       return;
     }
 
@@ -113,7 +119,8 @@ class CognitoAuthService {
       try {
         await _refreshSession();
       } catch (_) {
-        await signOut();
+        // Keep the stored session and retry refresh lazily on the next
+        // authenticated request instead of dropping the user out on startup.
       }
     }
   }
@@ -166,25 +173,37 @@ class CognitoAuthService {
     await user.confirmRegistration(code.trim());
   }
 
-  Future<AuthSession> signIn({
+  Future<SignInOutcome> signIn({
     required String email,
     required String password,
   }) async {
-    final user = CognitoUser(email.trim(), _userPool);
+    final normalizedEmail = email.trim();
+    final user = CognitoUser(normalizedEmail, _userPool);
     final authDetails = AuthenticationDetails(
-      username: email.trim(),
+      username: normalizedEmail,
       password: password,
     );
 
-    final CognitoUserSession? session =
-        await user.authenticateUser(authDetails);
+    clearPendingSignInChallenge();
+
+    CognitoUserSession? session;
+    try {
+      session = await user.authenticateUser(authDetails);
+    } on CognitoUserNewPasswordRequiredException catch (error) {
+      _pendingChallengeUser = user;
+      _pendingNewPasswordChallenge = PendingNewPasswordChallenge(
+        email: normalizedEmail,
+        requiredAttributes: List<String>.from(error.requiredAttributes ?? const []),
+      );
+      return SignInOutcome.newPasswordRequired;
+    }
 
     if (session == null) {
       throw Exception('Cognito sign-in did not return a session.');
     }
 
     final authSession = _sessionFromCognitoSession(
-      email: email.trim(),
+      email: normalizedEmail,
       session: session,
       fallbackRefreshToken: '',
     );
@@ -195,7 +214,73 @@ class CognitoAuthService {
     _profileIconLockedOverride = _extractProfileIconLocked(authSession.idToken);
     await _persist(authSession);
     _currentSession = authSession;
-    return authSession;
+    clearPendingSignInChallenge();
+    return SignInOutcome.signedIn;
+  }
+
+  Future<SignInOutcome> completeNewPasswordChallenge({
+    required String newPassword,
+    required String displayName,
+    required String profileIcon,
+  }) async {
+    final challenge = _pendingNewPasswordChallenge;
+    final user = _pendingChallengeUser;
+
+    if (challenge == null || user == null) {
+      throw Exception('No pending password challenge was found.');
+    }
+
+    final normalizedDisplayName = displayName.trim();
+    final normalizedProfileIcon = profileIcon.trim();
+
+    final requiredAttributes = <String, String>{};
+    for (final attribute in challenge.requiredAttributes) {
+      switch (attribute) {
+        case 'name':
+        case 'custom:display_name':
+          if (normalizedDisplayName.isEmpty) {
+            throw Exception('A display name is required to complete sign-in.');
+          }
+          requiredAttributes[attribute] = normalizedDisplayName;
+          break;
+        case 'custom:profile_icon':
+          if (!ProfileIconCatalog.isAllowed(normalizedProfileIcon)) {
+            throw Exception(
+              'Please choose a valid profile icon before completing sign-in.',
+            );
+          }
+          requiredAttributes[attribute] = normalizedProfileIcon;
+          break;
+        default:
+          throw Exception(
+            'This account requires an unsupported attribute before it can sign in: $attribute',
+          );
+      }
+    }
+
+    final session = await user.sendNewPasswordRequiredAnswer(
+      newPassword,
+      requiredAttributes.isEmpty ? null : requiredAttributes,
+    );
+
+    if (session == null) {
+      throw Exception('Cognito did not return a session after password update.');
+    }
+
+    final authSession = _sessionFromCognitoSession(
+      email: challenge.email,
+      session: session,
+      fallbackRefreshToken: '',
+    );
+
+    _displayNameOverride = null;
+    _displayNameLockedOverride = _extractDisplayNameLocked(authSession.idToken);
+    _profileIconOverride = null;
+    _profileIconLockedOverride = _extractProfileIconLocked(authSession.idToken);
+    await _persist(authSession);
+    _currentSession = authSession;
+    clearPendingSignInChallenge();
+    return SignInOutcome.signedIn;
   }
 
   Future<void> signOut() async {
@@ -204,9 +289,15 @@ class CognitoAuthService {
     _displayNameLockedOverride = false;
     _profileIconOverride = null;
     _profileIconLockedOverride = false;
+    clearPendingSignInChallenge();
     for (final key in _ownedStorageKeys) {
       await _storage.delete(key: key);
     }
+  }
+
+  void clearPendingSignInChallenge() {
+    _pendingChallengeUser = null;
+    _pendingNewPasswordChallenge = null;
   }
 
   Future<String?> getIdToken() async {

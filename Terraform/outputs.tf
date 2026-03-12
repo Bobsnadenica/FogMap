@@ -7,6 +7,7 @@ output "cognito_group_names" { value = [aws_cognito_user_group.admin.name, aws_c
 output "pending_landmark_bucket_name" { value = aws_s3_bucket.pending_landmarks.id }
 output "approved_landmark_bucket_name" { value = aws_s3_bucket.approved_landmarks.id }
 output "discovery_cache_bucket_name" { value = aws_s3_bucket.discovery_cache.id }
+output "shared_tile_rebuild_queue_url" { value = aws_sqs_queue.shared_tile_rebuild.id }
 output "cloudfront_approved_domain" { value = aws_cloudfront_distribution.approved_landmarks.domain_name }
 output "cloudfront_shared_tiles_domain" { value = aws_cloudfront_distribution.shared_tiles.domain_name }
 output "user_discoveries_table_name" { value = aws_dynamodb_table.user_discoveries.name }
@@ -25,5 +26,6 @@ output "lambda_function_names" {
     moderate_landmark               = aws_lambda_function.moderate_landmark.function_name
     get_landmark_view_url           = aws_lambda_function.get_landmark_view_url.function_name
     get_my_discovery_bootstrap      = aws_lambda_function.get_my_discovery_bootstrap.function_name
+    rebuild_shared_tiles            = aws_lambda_function.rebuild_shared_tiles.function_name
   }
 }

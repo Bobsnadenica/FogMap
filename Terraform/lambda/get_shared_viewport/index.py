@@ -1,10 +1,11 @@
+from boto3.dynamodb.conditions import Key
 from datetime import datetime
 from time import time
 from shared.common import dynamodb, utc_now_iso
-from shared.config import LANDMARKS_TABLE, PLAYER_PRESENCE_TABLE, SHARED_CELLS_TABLE, SHARED_TILE_CACHE_PREFIX, SHARED_TILE_CACHE_TTL_SECONDS
-from shared.discovery_cache import cache_object_key, get_or_build_cached_json
+from shared.config import PLAYER_PRESENCE_TABLE, SHARED_TILE_CACHE_TTL_SECONDS, SHARED_TILE_EDGE_CACHE_SECONDS
+from shared.discovery_cache import get_or_build_cached_json
 from shared.geo import in_bounds, tile_ids_for_bounds
-from shared.shared_tiles import build_shared_tile_snapshot
+from shared.shared_tiles import build_shared_tile_snapshot, shared_tile_cache_key
 
 presence_table = dynamodb.Table(PLAYER_PRESENCE_TABLE)
 VIEWPORT_CACHE = {}
@@ -119,12 +120,14 @@ def handler(event, context):
 
     for tile_id in tile_ids:
         tile_snapshot = get_or_build_cached_json(
-            cache_object_key(SHARED_TILE_CACHE_PREFIX, world_id, tile_id),
+            shared_tile_cache_key(world_id, tile_id),
             SHARED_TILE_CACHE_TTL_SECONDS,
             lambda world_id=world_id, tile_id=tile_id: build_shared_tile_snapshot(
                 world_id,
                 tile_id,
             ),
+            cache_control_seconds=SHARED_TILE_EDGE_CACHE_SECONDS,
+            memory_cache_ttl_seconds=VIEWPORT_CACHE_TTL_SECONDS,
         )
 
         for item in tile_snapshot.get("cells", []):

@@ -6,6 +6,7 @@ from .config import ADMIN_GROUPS
 
 dynamodb = boto3.resource("dynamodb")
 s3 = boto3.client("s3")
+sqs = boto3.client("sqs")
 
 class DecimalEncoder(json.JSONEncoder):
     def default(self, o):

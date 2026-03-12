@@ -10,7 +10,8 @@ class BackendConfig {
 
   static const String cloudFrontApprovedDomain =
       'd2op1xtsiy6g50.cloudfront.net';
-  static const String cloudFrontSharedTilesDomain = '';
+  static const String cloudFrontSharedTilesDomain =
+      'd2jmlw6i9yl338.cloudfront.net';
 
   static const String defaultWorldId = 'global';
 

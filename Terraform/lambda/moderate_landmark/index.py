@@ -1,8 +1,7 @@
 from boto3.dynamodb.conditions import Key
 from shared.common import dynamodb, require_admin, s3, utc_now_iso
-from shared.config import APPROVED_LANDMARK_BUCKET, LANDMARKS_TABLE, PENDING_LANDMARK_BUCKET, SHARED_TILE_CACHE_PREFIX, SHARED_TILE_CACHE_TTL_SECONDS
-from shared.discovery_cache import cache_object_key, store_cached_json
-from shared.shared_tiles import build_shared_tile_snapshot
+from shared.config import APPROVED_LANDMARK_BUCKET, LANDMARKS_TABLE, PENDING_LANDMARK_BUCKET
+from shared.tile_rebuild_queue import enqueue_shared_tile_rebuilds
 landmarks_table = dynamodb.Table(LANDMARKS_TABLE)
 
 def handler(event, context):
@@ -21,9 +20,5 @@ def handler(event, context):
     tile_id = item.get("tileId")
     world_id = (item.get("worldId") or "global").strip().lower()
     if tile_id:
-        store_cached_json(
-            cache_object_key(SHARED_TILE_CACHE_PREFIX, world_id, tile_id),
-            build_shared_tile_snapshot(world_id, tile_id),
-            SHARED_TILE_CACHE_TTL_SECONDS,
-        )
+        enqueue_shared_tile_rebuilds(world_id, [tile_id], reason=f"landmark-{status.lower()}")
     return {"landmarkId":landmark_id,"status":status,"approvedObjectKey":approved_key}

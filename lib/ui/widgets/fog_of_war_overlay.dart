@@ -68,48 +68,51 @@ class _FogOfWarPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final rect = Offset.zero & size;
+    final trailPath = _trailPath();
 
     canvas.saveLayer(rect, Paint());
 
-    // Heavier unexplored shroud so street labels/details are hard to read.
-    canvas.drawRect(
-      rect,
-      Paint()..color = const Color(0xB5120F0C),
-    );
-
-    // Warm parchment tint.
-    canvas.drawRect(
-      rect,
-      Paint()..color = const Color(0x331E1408),
-    );
-
-    // Extra vignette for the game-map feeling.
     canvas.drawRect(
       rect,
       Paint()
-        ..shader = RadialGradient(
-          center: Alignment.center,
-          radius: 1.08,
-          colors: const [
-            Color(0x00000000),
-            Color(0x33000000),
-            Color(0x66000000),
-            Color(0x99000000),
+        ..shader = const LinearGradient(
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+          colors: [
+            Color(0xEC11130F),
+            Color(0xF0161916),
+            Color(0xEC0E1214),
           ],
-          stops: const [0.0, 0.58, 0.82, 1.0],
         ).createShader(rect),
     );
+
+    canvas.drawRect(
+      rect,
+      Paint()
+        ..shader = const RadialGradient(
+          center: Alignment.topCenter,
+          radius: 1.15,
+          colors: [
+            Color(0x08000000),
+            Color(0x00000000),
+            Color(0x6A000000),
+          ],
+          stops: [0.0, 0.58, 1.0],
+        ).createShader(rect),
+    );
+
+    _paintTexture(canvas, rect);
 
     final stripSoftPaint = Paint()
       ..blendMode = BlendMode.dstOut
       ..style = PaintingStyle.fill
-      ..color = const Color(0xD8FFFFFF)
+      ..color = const Color(0xD0FFFFFF)
       ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2.4);
 
     final stripCorePaint = Paint()
       ..blendMode = BlendMode.dstOut
       ..style = PaintingStyle.fill
-      ..color = const Color(0xF2FFFFFF);
+      ..color = const Color(0xEEFFFFFF);
 
     for (final strip in _mergedCellStrips()) {
       final featherPath = _pathForStrip(strip, inflatePixels: 2.0);
@@ -119,7 +122,6 @@ class _FogOfWarPainter extends CustomPainter {
       canvas.drawPath(corePath, stripCorePaint);
     }
 
-    final trailPath = _trailPath();
     if (trailPath != null) {
       final trailWidth = _trailWidthPixels();
       final trailSoftPaint = Paint()
@@ -149,12 +151,63 @@ class _FogOfWarPainter extends CustomPainter {
 
     canvas.restore();
 
-    final borderPaint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 5
-      ..color = const Color(0x996A4A22);
+    if (trailPath != null) {
+      final edgeGlowPaint = Paint()
+        ..style = PaintingStyle.stroke
+        ..strokeCap = StrokeCap.round
+        ..strokeJoin = StrokeJoin.round
+        ..strokeWidth = _trailWidthPixels() + 2
+        ..color = const Color(0x24F5D8A2)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 4);
+      canvas.drawPath(trailPath, edgeGlowPaint);
+    }
 
-    canvas.drawRect(rect.deflate(3), borderPaint);
+    canvas.drawRect(
+      rect,
+      Paint()
+        ..shader = const RadialGradient(
+          center: Alignment.center,
+          radius: 0.98,
+          colors: [
+            Color(0x00000000),
+            Color(0x08000000),
+            Color(0x22000000),
+          ],
+          stops: [0.55, 0.82, 1.0],
+        ).createShader(rect),
+    );
+  }
+
+  void _paintTexture(Canvas canvas, Rect rect) {
+    final hatchPaint = Paint()
+      ..color = const Color(0x0CF2E8D4)
+      ..strokeWidth = 1;
+
+    for (double x = -rect.height; x < rect.width + rect.height; x += 24) {
+      canvas.drawLine(
+        Offset(x, 0),
+        Offset(x - rect.height, rect.height),
+        hatchPaint,
+      );
+    }
+
+    final contourPaint = Paint()
+      ..color = const Color(0x0AF3E6CB)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.15;
+
+    for (double y = rect.height * 0.12; y < rect.height; y += 78) {
+      final path = ui.Path()..moveTo(-24, y);
+      for (double x = 0; x <= rect.width + 48; x += 42) {
+        final dx = x - 24;
+        final waveY = y + math.sin((x / rect.width) * math.pi * 2.4) * 8;
+        final nextX = dx + 42;
+        final nextY = y +
+            math.sin(((x + 42) / rect.width) * math.pi * 2.4) * 8;
+        path.quadraticBezierTo(dx + 21, waveY, nextX, nextY);
+      }
+      canvas.drawPath(path, contourPaint);
+    }
   }
 
   List<_CellStrip> _mergedCellStrips() {

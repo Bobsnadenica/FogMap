@@ -2,11 +2,14 @@ import os
 
 from boto3.dynamodb.conditions import Key
 
+from shared.atlas_tiles import item_cells
 from shared.common import dynamodb
 from shared.config import USER_BOOTSTRAP_CACHE_PREFIX, USER_BOOTSTRAP_CACHE_TTL_SECONDS
 from shared.discovery_cache import cache_object_key, get_or_build_cached_json
 
 USER_DISCOVERIES_TABLE = os.environ["USER_DISCOVERIES_TABLE"]
+CELL_DEGREES = 0.00018
+
 table = dynamodb.Table(USER_DISCOVERIES_TABLE)
 
 
@@ -23,7 +26,6 @@ def _build_user_bootstrap(user_id):
     while True:
         query_args = {
             "KeyConditionExpression": Key("pk").eq(f"USER#{user_id}"),
-            "ProjectionExpression": "sk, lat, lon",
         }
         if last_evaluated_key:
             query_args["ExclusiveStartKey"] = last_evaluated_key
@@ -35,16 +37,14 @@ def _build_user_bootstrap(user_id):
         if not last_evaluated_key:
             break
 
+    cells_by_id = {}
+    for item in items:
+        for cell in item_cells(item, default_cell_degrees=CELL_DEGREES):
+            cells_by_id[cell["cellId"]] = cell
+
     return {
         "userId": user_id,
-        "cells": [
-            {
-                "cellId": str(item["sk"]).replace("CELL#", ""),
-                "lat": float(item["lat"]),
-                "lon": float(item["lon"]),
-            }
-            for item in items
-        ],
+        "cells": sorted(cells_by_id.values(), key=lambda cell: cell["cellId"]),
     }
 
 
